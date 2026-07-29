@@ -11,6 +11,8 @@ static NSString * const RMEnabledKey = @"rm_hook_free_iap_enabled_v103";
 static BOOL RMHookInstalled = NO;
 static BOOL RMUIInstalled = NO;
 static IMP RMOrigPurchaseImp = NULL;
+static IMP RMOrigFailImp = NULL;
+static IMP RMOrigTimeoutImp = NULL;
 static UIView *RMMenuView = nil;
 static UIButton *RMBallButton = nil;
 static id RMMenuController = nil;
@@ -21,6 +23,7 @@ static id RMMenuController = nil;
 - (void)setStartPurchaseCalled:(BOOL)called;
 - (void)setFetchThisProductToPurchase:(id)productIdentifier;
 - (BOOL)startPurchaseCalled;
+- (id)fetchThisProductToPurchase;
 @end
 
 @interface RMFakePayment : NSObject
@@ -77,40 +80,102 @@ static RMFakeTransaction *RMMakeFakeTransaction(id productIdentifier) {
     return tx;
 }
 
+
+static id RMProductIDFromTransaction(id transaction) {
+    if (!transaction) return nil;
+    @try {
+        if ([transaction respondsToSelector:@selector(payment)]) {
+            id payment = ((id (*)(id, SEL))objc_msgSend)(transaction, @selector(payment));
+            if (payment && [payment respondsToSelector:@selector(productIdentifier)]) {
+                id pid = ((id (*)(id, SEL))objc_msgSend)(payment, @selector(productIdentifier));
+                if ([pid isKindOfClass:NSString.class]) return pid;
+            }
+        }
+    } @catch (NSException *e) {
+        RMLog(@"product from transaction exception: %@", e);
+    }
+    return nil;
+}
+
+static id RMCurrentProductIDFromManager(id manager) {
+    @try {
+        if ([manager respondsToSelector:@selector(fetchThisProductToPurchase)]) {
+            id pid = ((id (*)(id, SEL))objc_msgSend)(manager, @selector(fetchThisProductToPurchase));
+            if (pid) return pid;
+        }
+    } @catch (NSException *e) {
+        RMLog(@"fetch current product exception: %@", e);
+    }
+    return @"rm.fake.product";
+}
+
+static void RMPrepareManagerForSuccess(id manager, id productIdentifier) {
+    if ([manager respondsToSelector:@selector(setFetchThisProductToPurchase:)]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(manager, @selector(setFetchThisProductToPurchase:), productIdentifier);
+        RMLog(@"setFetchThisProductToPurchase:%@", RMProductIDFromObject(productIdentifier));
+    }
+    if ([manager respondsToSelector:@selector(setStartPurchaseCalled:)]) {
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(manager, @selector(setStartPurchaseCalled:), YES);
+        RMLog(@"setStartPurchaseCalled:YES");
+    }
+    if ([manager respondsToSelector:@selector(startPurchaseCalled)]) {
+        BOOL called = ((BOOL (*)(id, SEL))objc_msgSend)(manager, @selector(startPurchaseCalled));
+        RMLog(@"startPurchaseCalled now=%@", called ? @"YES" : @"NO");
+    }
+}
+
+static void RMCompleteWithProduct(id manager, id productIdentifier, NSString *reason) {
+    RMFakeTransaction *tx = RMMakeFakeTransaction(productIdentifier);
+    RMLog(@"%@ pid=%@ tx=%@", reason, tx.payment.productIdentifier, tx.transactionIdentifier);
+    RMPrepareManagerForSuccess(manager, productIdentifier);
+    if ([manager respondsToSelector:@selector(complete:retry:)]) {
+        ((void (*)(id, SEL, id, BOOL))objc_msgSend)(manager, @selector(complete:retry:), tx, NO);
+        RMLog(@"called complete:retry:NO reason=%@", reason);
+    } else {
+        RMLog(@"complete:retry: missing reason=%@", reason);
+    }
+}
+
 static void RMReplacedPurchase(id self, SEL _cmd, id productIdentifier) {
     if (!RMFreeIAPEnabled) {
         if (RMOrigPurchaseImp) ((void (*)(id, SEL, id))RMOrigPurchaseImp)(self, _cmd, productIdentifier);
         return;
     }
-    RMFakeTransaction *tx = RMMakeFakeTransaction(productIdentifier);
-    RMLog(@"intercept purchase pid=%@ tx=%@", tx.payment.productIdentifier, tx.transactionIdentifier);
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
-            if ([self respondsToSelector:@selector(setFetchThisProductToPurchase:)]) {
-                ((void (*)(id, SEL, id))objc_msgSend)(self, @selector(setFetchThisProductToPurchase:), productIdentifier);
-                RMLog(@"setFetchThisProductToPurchase:%@", tx.payment.productIdentifier);
-            }
-            if ([self respondsToSelector:@selector(setStartPurchaseCalled:)]) {
-                ((void (*)(id, SEL, BOOL))objc_msgSend)(self, @selector(setStartPurchaseCalled:), YES);
-                RMLog(@"setStartPurchaseCalled:YES");
-            }
-            if ([self respondsToSelector:@selector(startPurchaseCalled)]) {
-                BOOL called = ((BOOL (*)(id, SEL))objc_msgSend)(self, @selector(startPurchaseCalled));
-                RMLog(@"startPurchaseCalled now=%@", called ? @"YES" : @"NO");
-            }
-            if ([self respondsToSelector:@selector(complete:retry:)]) {
-                // complete:retry: only calls delegate didPurchase: when retry=YES or startPurchaseCalled=YES.
-                // We set startPurchaseCalled=YES above and keep retry=NO so the result looks like a fresh purchase.
-                ((void (*)(id, SEL, id, BOOL))objc_msgSend)(self, @selector(complete:retry:), tx, NO);
-                RMLog(@"called complete:retry:NO");
-            } else if (RMOrigPurchaseImp) {
-                RMLog(@"complete:retry: missing, fallback original");
-                ((void (*)(id, SEL, id))RMOrigPurchaseImp)(self, _cmd, productIdentifier);
-            }
+            RMCompleteWithProduct(self, productIdentifier, @"intercept purchase");
         } @catch (NSException *e) {
-            RMLog(@"exception in fake complete: %@", e);
+            RMLog(@"exception in fake purchase complete: %@", e);
             if (RMOrigPurchaseImp) ((void (*)(id, SEL, id))RMOrigPurchaseImp)(self, _cmd, productIdentifier);
         }
+    });
+}
+
+
+static void RMReplacedFail(id self, SEL _cmd, id transaction, BOOL retry) {
+    if (!RMFreeIAPEnabled) {
+        if (RMOrigFailImp) ((void (*)(id, SEL, id, BOOL))RMOrigFailImp)(self, _cmd, transaction, retry);
+        return;
+    }
+    id pid = RMProductIDFromTransaction(transaction);
+    if (!pid) pid = RMCurrentProductIDFromManager(self);
+    RMLog(@"suppressed fail:retry:%@ -> success pid=%@", retry ? @"YES" : @"NO", RMProductIDFromObject(pid));
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try { RMCompleteWithProduct(self, pid, @"fail-to-success fallback"); }
+        @catch (NSException *e) { RMLog(@"exception in fail fallback: %@", e); }
+    });
+}
+
+static void RMReplacedPurchaseQueryTimedOut(id self, SEL _cmd, id timer) {
+    if (!RMFreeIAPEnabled) {
+        if (RMOrigTimeoutImp) ((void (*)(id, SEL, id))RMOrigTimeoutImp)(self, _cmd, timer);
+        return;
+    }
+    id pid = RMCurrentProductIDFromManager(self);
+    RMLog(@"suppressed purchase timeout -> success pid=%@", RMProductIDFromObject(pid));
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try { RMCompleteWithProduct(self, pid, @"timeout-to-success fallback"); }
+        @catch (NSException *e) { RMLog(@"exception in timeout fallback: %@", e); }
     });
 }
 
@@ -124,6 +189,14 @@ static void RMInstallHook(void) {
     Method m = class_getInstanceMethod(cls, @selector(purchase:));
     if (!m) { RMLog(@"DGPurchaseManager purchase: not found"); return; }
     MSHookMessageEx(cls, @selector(purchase:), (IMP)RMReplacedPurchase, &RMOrigPurchaseImp);
+    if (class_getInstanceMethod(cls, @selector(fail:retry:))) {
+        MSHookMessageEx(cls, @selector(fail:retry:), (IMP)RMReplacedFail, &RMOrigFailImp);
+        RMLog(@"hooked -[DGPurchaseManager fail:retry:]");
+    }
+    if (class_getInstanceMethod(cls, @selector(purchaseQueryTimedOut:))) {
+        MSHookMessageEx(cls, @selector(purchaseQueryTimedOut:), (IMP)RMReplacedPurchaseQueryTimedOut, &RMOrigTimeoutImp);
+        RMLog(@"hooked -[DGPurchaseManager purchaseQueryTimedOut:]");
+    }
     RMHookInstalled = YES;
     RMLog(@"hooked -[DGPurchaseManager purchase:]");
 }
