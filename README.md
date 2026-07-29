@@ -1,1 +1,24 @@
-# match-ios
+# RoyalIAPHook for Royal Match 37314
+
+Rootless jailbreak tweak for `com.dreamgames.royalmatch`.
+
+## Build
+
+Push to GitHub, then open Actions -> Build rootless deb -> Run workflow.
+Download artifact `RoyalIAPHook-rootless-deb`.
+
+## Cleanup old broken package on device
+
+```bash
+dpkg --remove --force-remove-reinstreq com.ctf.royal.iaphook.rootless 2>/dev/null || true
+dpkg --remove --force-remove-reinstreq com.ctf.royal.iaphook 2>/dev/null || true
+rm -f /var/jb/Library/MobileSubstrate/DynamicLibraries/RoyalIAPHook.dylib
+rm -f /var/jb/Library/MobileSubstrate/DynamicLibraries/RoyalIAPHook.plist
+sbreload || killall -9 SpringBoard
+```
+
+## Logs
+
+```bash
+log stream --predicate 'process == "RoyalMatch" OR eventMessage CONTAINS "RM-IAP"' --style compact
+```

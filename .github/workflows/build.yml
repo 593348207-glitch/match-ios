@@ -1,0 +1,28 @@
+name: Build rootless deb
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: |
+          brew update
+          brew install dpkg ldid make
+      - name: Install Theos
+        run: |
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+      - name: Build package
+        run: |
+          make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          ls -la packages
+      - name: Upload deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RoyalIAPHook-rootless-deb
+          path: packages/*.deb
