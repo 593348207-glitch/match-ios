@@ -13,6 +13,8 @@ static BOOL RMUIInstalled = NO;
 static IMP RMOrigPurchaseImp = NULL;
 static IMP RMOrigFailImp = NULL;
 static IMP RMOrigTimeoutImp = NULL;
+static IMP RMOrigConsumeImp = NULL;
+static IMP RMOrigFinishImp = NULL;
 static UIView *RMMenuView = nil;
 static UIButton *RMBallButton = nil;
 static id RMMenuController = nil;
@@ -24,6 +26,9 @@ static id RMMenuController = nil;
 - (void)setFetchThisProductToPurchase:(id)productIdentifier;
 - (BOOL)startPurchaseCalled;
 - (id)fetchThisProductToPurchase;
+- (id)delegate;
+- (void)consume:(id)transaction;
+- (void)finish:(id)transaction;
 @end
 
 @interface RMFakePayment : NSObject
@@ -128,11 +133,40 @@ static void RMCompleteWithProduct(id manager, id productIdentifier, NSString *re
     RMFakeTransaction *tx = RMMakeFakeTransaction(productIdentifier);
     RMLog(@"%@ pid=%@ tx=%@", reason, tx.payment.productIdentifier, tx.transactionIdentifier);
     RMPrepareManagerForSuccess(manager, productIdentifier);
+
+    Class resultClass = objc_getClass("DGPurchaseResult");
+    id result = nil;
+    if (resultClass) {
+        result = ((id (*)(id, SEL))objc_msgSend)((id)resultClass, @selector(alloc));
+        if ([result respondsToSelector:@selector(init:retry:)]) {
+            result = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(result, @selector(init:retry:), tx, NO);
+        } else {
+            RMLog(@"DGPurchaseResult init:retry: missing");
+            result = nil;
+        }
+    } else {
+        RMLog(@"DGPurchaseResult class missing");
+    }
+
+    id delegate = nil;
+    if ([manager respondsToSelector:@selector(delegate)]) {
+        delegate = ((id (*)(id, SEL))objc_msgSend)(manager, @selector(delegate));
+    }
+
+    if (delegate && result && [delegate respondsToSelector:@selector(didPurchase:)]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(delegate, @selector(didPurchase:), result);
+        RMLog(@"called delegate didPurchase: reason=%@ delegate=%@", reason, delegate);
+        if ([manager respondsToSelector:@selector(setStartPurchaseCalled:)]) {
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(manager, @selector(setStartPurchaseCalled:), NO);
+            RMLog(@"reset setStartPurchaseCalled:NO after direct delegate");
+        }
+        return;
+    }
+
+    RMLog(@"direct delegate unavailable, fallback complete:retry: delegate=%@ result=%@", delegate, result);
     if ([manager respondsToSelector:@selector(complete:retry:)]) {
         ((void (*)(id, SEL, id, BOOL))objc_msgSend)(manager, @selector(complete:retry:), tx, NO);
-        RMLog(@"called complete:retry:NO reason=%@", reason);
-    } else {
-        RMLog(@"complete:retry: missing reason=%@", reason);
+        RMLog(@"fallback called complete:retry:NO reason=%@", reason);
     }
 }
 
@@ -179,6 +213,33 @@ static void RMReplacedPurchaseQueryTimedOut(id self, SEL _cmd, id timer) {
     });
 }
 
+
+static BOOL RMIsFakeTransaction(id transaction) {
+    return transaction && [transaction isKindOfClass:objc_getClass("RMFakeTransaction")];
+}
+
+static void RMReplacedConsume(id self, SEL _cmd, id transaction) {
+    if (!RMFreeIAPEnabled) {
+        if (RMOrigConsumeImp) ((void (*)(id, SEL, id))RMOrigConsumeImp)(self, _cmd, transaction);
+        return;
+    }
+    RMLog(@"consume suppressed transaction=%@ fake=%@", transaction, RMIsFakeTransaction(transaction) ? @"YES" : @"NO");
+    if ([self respondsToSelector:@selector(setStartPurchaseCalled:)]) {
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(self, @selector(setStartPurchaseCalled:), NO);
+    }
+}
+
+static void RMReplacedFinish(id self, SEL _cmd, id transaction) {
+    if (!RMFreeIAPEnabled) {
+        if (RMOrigFinishImp) ((void (*)(id, SEL, id))RMOrigFinishImp)(self, _cmd, transaction);
+        return;
+    }
+    RMLog(@"finish suppressed transaction=%@ fake=%@", transaction, RMIsFakeTransaction(transaction) ? @"YES" : @"NO");
+    if ([self respondsToSelector:@selector(setStartPurchaseCalled:)]) {
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(self, @selector(setStartPurchaseCalled:), NO);
+    }
+}
+
 static void RMInstallHook(void) {
     if (RMHookInstalled) return;
     Class cls = objc_getClass("DGPurchaseManager");
@@ -196,6 +257,14 @@ static void RMInstallHook(void) {
     if (class_getInstanceMethod(cls, @selector(purchaseQueryTimedOut:))) {
         MSHookMessageEx(cls, @selector(purchaseQueryTimedOut:), (IMP)RMReplacedPurchaseQueryTimedOut, &RMOrigTimeoutImp);
         RMLog(@"hooked -[DGPurchaseManager purchaseQueryTimedOut:]");
+    }
+    if (class_getInstanceMethod(cls, @selector(consume:))) {
+        MSHookMessageEx(cls, @selector(consume:), (IMP)RMReplacedConsume, &RMOrigConsumeImp);
+        RMLog(@"hooked -[DGPurchaseManager consume:]");
+    }
+    if (class_getInstanceMethod(cls, @selector(finish:))) {
+        MSHookMessageEx(cls, @selector(finish:), (IMP)RMReplacedFinish, &RMOrigFinishImp);
+        RMLog(@"hooked -[DGPurchaseManager finish:]");
     }
     RMHookInstalled = YES;
     RMLog(@"hooked -[DGPurchaseManager purchase:]");
