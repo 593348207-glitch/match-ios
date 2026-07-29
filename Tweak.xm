@@ -51,12 +51,39 @@ static id RMMenuController = nil;
 - (NSError *)error { return nil; }
 @end
 
+static NSString *RMLogPath(void) {
+    NSArray *dirs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *doc = dirs.firstObject;
+    if (doc.length == 0) doc = @"/var/mobile/Documents";
+    return [doc stringByAppendingPathComponent:@"RoyalMatchIAPHook.log"];
+}
+
+static void RMAppendFileLog(NSString *line) {
+    @try {
+        NSString *path = RMLogPath();
+        NSString *out = [line stringByAppendingString:@"\n"];
+        NSData *data = [out dataUsingEncoding:NSUTF8StringEncoding];
+        if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+            [data writeToFile:path atomically:YES];
+            return;
+        }
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (fh) {
+            [fh seekToEndOfFile];
+            [fh writeData:data];
+            [fh closeFile];
+        }
+    } @catch (__unused NSException *e) {}
+}
+
 static void RMLog(NSString *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
     va_end(ap);
-    NSLog(@"[RM-IAP] %@", msg);
+    NSString *line = [NSString stringWithFormat:@"[%@] [RM-IAP] %@", [NSDate date], msg];
+    NSLog(@"%@", line);
+    RMAppendFileLog(line);
 }
 
 static void RMSaveEnabled(BOOL enabled) {
@@ -381,6 +408,6 @@ __attribute__((constructor)) static void RMEntry(void) {
             RMInstallHook(); RMInstallFloatingMenu();
         }];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ RMInstallHook(); RMInstallFloatingMenu(); });
-        RMLog(@"tweak loaded");
+        RMLog(@"tweak loaded log=%@", RMLogPath());
     }
 }
