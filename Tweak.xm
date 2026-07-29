@@ -18,6 +18,9 @@ static id RMMenuController = nil;
 @interface DGPurchaseManager : NSObject
 - (void)purchase:(id)productIdentifier;
 - (void)complete:(id)transaction retry:(BOOL)retry;
+- (void)setStartPurchaseCalled:(BOOL)called;
+- (void)setFetchThisProductToPurchase:(id)productIdentifier;
+- (BOOL)startPurchaseCalled;
 @end
 
 @interface RMFakePayment : NSObject
@@ -83,8 +86,23 @@ static void RMReplacedPurchase(id self, SEL _cmd, id productIdentifier) {
     RMLog(@"intercept purchase pid=%@ tx=%@", tx.payment.productIdentifier, tx.transactionIdentifier);
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
+            if ([self respondsToSelector:@selector(setFetchThisProductToPurchase:)]) {
+                ((void (*)(id, SEL, id))objc_msgSend)(self, @selector(setFetchThisProductToPurchase:), productIdentifier);
+                RMLog(@"setFetchThisProductToPurchase:%@", tx.payment.productIdentifier);
+            }
+            if ([self respondsToSelector:@selector(setStartPurchaseCalled:)]) {
+                ((void (*)(id, SEL, BOOL))objc_msgSend)(self, @selector(setStartPurchaseCalled:), YES);
+                RMLog(@"setStartPurchaseCalled:YES");
+            }
+            if ([self respondsToSelector:@selector(startPurchaseCalled)]) {
+                BOOL called = ((BOOL (*)(id, SEL))objc_msgSend)(self, @selector(startPurchaseCalled));
+                RMLog(@"startPurchaseCalled now=%@", called ? @"YES" : @"NO");
+            }
             if ([self respondsToSelector:@selector(complete:retry:)]) {
+                // complete:retry: only calls delegate didPurchase: when retry=YES or startPurchaseCalled=YES.
+                // We set startPurchaseCalled=YES above and keep retry=NO so the result looks like a fresh purchase.
                 ((void (*)(id, SEL, id, BOOL))objc_msgSend)(self, @selector(complete:retry:), tx, NO);
+                RMLog(@"called complete:retry:NO");
             } else if (RMOrigPurchaseImp) {
                 RMLog(@"complete:retry: missing, fallback original");
                 ((void (*)(id, SEL, id))RMOrigPurchaseImp)(self, _cmd, productIdentifier);

@@ -26,3 +26,7 @@ log stream --predicate 'process == "RoyalMatch" OR eventMessage CONTAINS "RM-IAP
 ## Default state
 
 The floating ball is visible, the menu is collapsed, and the Free IAP switch is OFF by default. Tap the IAP ball and enable it manually when needed.
+
+## 1.0.4 fix
+
+The hook now sets DGPurchaseManager.startPurchaseCalled=YES before complete:retry:NO, matching the native success path and preventing the purchase spinner from waiting forever.
