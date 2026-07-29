@@ -22,3 +22,7 @@ sbreload || killall -9 SpringBoard
 ```bash
 log stream --predicate 'process == "RoyalMatch" OR eventMessage CONTAINS "RM-IAP"' --style compact
 ```
+
+## Default state
+
+The floating ball is visible, the menu is collapsed, and the Free IAP switch is OFF by default. Tap the IAP ball and enable it manually when needed.

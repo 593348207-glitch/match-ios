@@ -6,8 +6,8 @@
 #import <objc/message.h>
 #import <substrate.h>
 
-static BOOL RMFreeIAPEnabled = YES;
-static NSString * const RMEnabledKey = @"rm_hook_free_iap_enabled";
+static BOOL RMFreeIAPEnabled = NO;
+static NSString * const RMEnabledKey = @"rm_hook_free_iap_enabled_v103";
 static BOOL RMHookInstalled = NO;
 static BOOL RMUIInstalled = NO;
 static IMP RMOrigPurchaseImp = NULL;
@@ -176,7 +176,7 @@ static void RMInstallFloatingMenu(void) {
     UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(142, 45, 54, 32)];
     sw.on = RMFreeIAPEnabled; [sw addTarget:RMMenuController action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];
     UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(14, 82, 185, 18)];
-    hint.text = @"ON: fake local purchased"; hint.textColor = UIColor.lightGrayColor; hint.font = [UIFont systemFontOfSize:11];
+    hint.text = @"OFF by default; enable manually"; hint.textColor = UIColor.lightGrayColor; hint.font = [UIFont systemFontOfSize:11];
     [RMMenuView addSubview:title]; [RMMenuView addSubview:row]; [RMMenuView addSubview:sw]; [RMMenuView addSubview:hint];
     [root addSubview:RMMenuView]; [root addSubview:RMBallButton];
     objc_setAssociatedObject(root, @selector(RMInstallFloatingMenu), RMMenuController, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -187,7 +187,7 @@ static void RMInstallFloatingMenu(void) {
 __attribute__((constructor)) static void RMEntry(void) {
     @autoreleasepool {
         NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
-        if ([ud objectForKey:RMEnabledKey] == nil) { [ud setBool:YES forKey:RMEnabledKey]; [ud synchronize]; }
+        if ([ud objectForKey:RMEnabledKey] == nil) { [ud setBool:NO forKey:RMEnabledKey]; [ud synchronize]; }
         RMFreeIAPEnabled = [ud boolForKey:RMEnabledKey];
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *note) {
             RMInstallHook(); RMInstallFloatingMenu();

@@ -1,6 +1,6 @@
 Package: com.ctf.royal.iaphook
 Name: RoyalIAPHook
-Version: 1.0.2
+Version: 1.0.3
 Architecture: iphoneos-arm64
 Depends: mobilesubstrate | ellekit
 Description: Royal Match 37314 floating menu Free-IAP hook for rootless jailbreak
