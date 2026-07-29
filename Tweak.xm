@@ -27,8 +27,11 @@ static id RMMenuController = nil;
 - (BOOL)startPurchaseCalled;
 - (id)fetchThisProductToPurchase;
 - (id)delegate;
-- (void)consume:(id)transaction;
-- (void)finish:(id)transaction;
+- (BOOL)consume:(id)transaction;
+- (BOOL)finish:(id)transaction;
+- (void)setPurchaseQueryTimedOut:(BOOL)timedOut;
+- (id)timer;
+- (void)setTimer:(id)timer;
 @end
 
 @interface RMFakePayment : NSObject
@@ -129,6 +132,36 @@ static void RMPrepareManagerForSuccess(id manager, id productIdentifier) {
     }
 }
 
+static void RMResetManagerAfterAck(id manager) {
+    @try {
+        if ([manager respondsToSelector:@selector(timer)]) {
+            id timer = ((id (*)(id, SEL))objc_msgSend)(manager, @selector(timer));
+            if (timer && [timer respondsToSelector:@selector(invalidate)]) {
+                ((void (*)(id, SEL))objc_msgSend)(timer, @selector(invalidate));
+                RMLog(@"timer invalidated");
+            }
+        }
+        if ([manager respondsToSelector:@selector(setTimer:)]) {
+            ((void (*)(id, SEL, id))objc_msgSend)(manager, @selector(setTimer:), nil);
+            RMLog(@"setTimer:nil");
+        }
+        if ([manager respondsToSelector:@selector(setPurchaseQueryTimedOut:)]) {
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(manager, @selector(setPurchaseQueryTimedOut:), NO);
+            RMLog(@"setPurchaseQueryTimedOut:NO");
+        }
+        if ([manager respondsToSelector:@selector(setFetchThisProductToPurchase:)]) {
+            ((void (*)(id, SEL, id))objc_msgSend)(manager, @selector(setFetchThisProductToPurchase:), nil);
+            RMLog(@"setFetchThisProductToPurchase:nil");
+        }
+        if ([manager respondsToSelector:@selector(setStartPurchaseCalled:)]) {
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(manager, @selector(setStartPurchaseCalled:), NO);
+            RMLog(@"setStartPurchaseCalled:NO");
+        }
+    } @catch (NSException *e) {
+        RMLog(@"reset manager exception: %@", e);
+    }
+}
+
 static void RMCompleteWithProduct(id manager, id productIdentifier, NSString *reason) {
     RMFakeTransaction *tx = RMMakeFakeTransaction(productIdentifier);
     RMLog(@"%@ pid=%@ tx=%@", reason, tx.payment.productIdentifier, tx.transactionIdentifier);
@@ -156,10 +189,7 @@ static void RMCompleteWithProduct(id manager, id productIdentifier, NSString *re
     if (delegate && result && [delegate respondsToSelector:@selector(didPurchase:)]) {
         ((void (*)(id, SEL, id))objc_msgSend)(delegate, @selector(didPurchase:), result);
         RMLog(@"called delegate didPurchase: reason=%@ delegate=%@", reason, delegate);
-        if ([manager respondsToSelector:@selector(setStartPurchaseCalled:)]) {
-            ((void (*)(id, SEL, BOOL))objc_msgSend)(manager, @selector(setStartPurchaseCalled:), NO);
-            RMLog(@"reset setStartPurchaseCalled:NO after direct delegate");
-        }
+        RMResetManagerAfterAck(manager);
         return;
     }
 
@@ -218,26 +248,24 @@ static BOOL RMIsFakeTransaction(id transaction) {
     return transaction && [transaction isKindOfClass:objc_getClass("RMFakeTransaction")];
 }
 
-static void RMReplacedConsume(id self, SEL _cmd, id transaction) {
+static BOOL RMReplacedConsume(id self, SEL _cmd, id transaction) {
     if (!RMFreeIAPEnabled) {
-        if (RMOrigConsumeImp) ((void (*)(id, SEL, id))RMOrigConsumeImp)(self, _cmd, transaction);
-        return;
+        if (RMOrigConsumeImp) return ((BOOL (*)(id, SEL, id))RMOrigConsumeImp)(self, _cmd, transaction);
+        return NO;
     }
-    RMLog(@"consume suppressed transaction=%@ fake=%@", transaction, RMIsFakeTransaction(transaction) ? @"YES" : @"NO");
-    if ([self respondsToSelector:@selector(setStartPurchaseCalled:)]) {
-        ((void (*)(id, SEL, BOOL))objc_msgSend)(self, @selector(setStartPurchaseCalled:), NO);
-    }
+    RMLog(@"consume ACK forced YES transaction=%@ fake=%@", transaction, RMIsFakeTransaction(transaction) ? @"YES" : @"NO");
+    RMResetManagerAfterAck(self);
+    return YES;
 }
 
-static void RMReplacedFinish(id self, SEL _cmd, id transaction) {
+static BOOL RMReplacedFinish(id self, SEL _cmd, id transaction) {
     if (!RMFreeIAPEnabled) {
-        if (RMOrigFinishImp) ((void (*)(id, SEL, id))RMOrigFinishImp)(self, _cmd, transaction);
-        return;
+        if (RMOrigFinishImp) return ((BOOL (*)(id, SEL, id))RMOrigFinishImp)(self, _cmd, transaction);
+        return NO;
     }
-    RMLog(@"finish suppressed transaction=%@ fake=%@", transaction, RMIsFakeTransaction(transaction) ? @"YES" : @"NO");
-    if ([self respondsToSelector:@selector(setStartPurchaseCalled:)]) {
-        ((void (*)(id, SEL, BOOL))objc_msgSend)(self, @selector(setStartPurchaseCalled:), NO);
-    }
+    RMLog(@"finish ACK forced YES transaction=%@ fake=%@", transaction, RMIsFakeTransaction(transaction) ? @"YES" : @"NO");
+    RMResetManagerAfterAck(self);
+    return YES;
 }
 
 static void RMInstallHook(void) {
