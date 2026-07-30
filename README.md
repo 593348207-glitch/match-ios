@@ -27,10 +27,14 @@ log stream --predicate 'process == "RoyalMatch" OR eventMessage CONTAINS "RM-IAP
 
 The floating ball is visible, the menu is collapsed, and the Free IAP switch is OFF by default. Tap the IAP ball and enable it manually when needed.
 
-## 1.0.9 fix
+## 1.1.0 fix
 
 The hook now sets DGPurchaseManager.startPurchaseCalled=YES before complete:retry:NO, matching the native success path and preventing the purchase spinner from waiting forever.
 
-## 1.0.9 probe
+## 1.1.0 probe
 
 Adds IL2CPP runtime class/method enumeration for purchase, shop package, inventory, verifier, reward, booster, coin and UserGameData symbols. Probe output is written to `Documents/RoyalMatchIAPHook.log`.
+
+## 1.1.0 Unity fail suppression
+
+Adds IL2CPP methodPointer hooks for `Royal.Scenes.Home.Ui.Sections.Shop.PurchaseStrategy::OnPurchaseFail` and `SendPurchaseFail`. This confirms and suppresses Unity-side failure callbacks after native fake purchase succeeds. Logs use `[UNITYHOOK]` in `Documents/RoyalMatchIAPHook.log`.

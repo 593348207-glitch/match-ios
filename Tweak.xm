@@ -16,6 +16,8 @@ static IMP RMOrigFailImp = NULL;
 static IMP RMOrigTimeoutImp = NULL;
 static IMP RMOrigConsumeImp = NULL;
 static IMP RMOrigFinishImp = NULL;
+static void (*RMOrigUnityOnPurchaseFail)(void *self, const void *method) = NULL;
+static void (*RMOrigUnitySendPurchaseFail)(void *self, void *a, void *b, void *c, const void *method) = NULL;
 static UIView *RMMenuView = nil;
 static UIButton *RMBallButton = nil;
 static id RMMenuController = nil;
@@ -178,6 +180,79 @@ static void RMSaveEnabled(BOOL enabled) {
     [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:RMEnabledKey];
     [[NSUserDefaults standardUserDefaults] synchronize];
     RMLog(@"Free IAP = %@", enabled ? @"ON" : @"OFF");
+}
+
+
+typedef const void *(*RM_il2cpp_class_from_name_t)(const void *image, const char *namespaze, const char *name);
+typedef const void *(*RM_il2cpp_class_get_method_from_name_t)(const void *klass, const char *name, int argsCount);
+
+static void *RMMethodPointer(const void *methodInfo) {
+    if (!methodInfo) return NULL;
+    return *((void **)methodInfo);
+}
+
+static const void *RMFindImageByName(NSString *targetImageName) {
+    RM_il2cpp_domain_get_t domain_get = (RM_il2cpp_domain_get_t)dlsym(RTLD_DEFAULT, "il2cpp_domain_get");
+    RM_il2cpp_domain_get_assemblies_t domain_get_assemblies = (RM_il2cpp_domain_get_assemblies_t)dlsym(RTLD_DEFAULT, "il2cpp_domain_get_assemblies");
+    RM_il2cpp_assembly_get_image_t assembly_get_image = (RM_il2cpp_assembly_get_image_t)dlsym(RTLD_DEFAULT, "il2cpp_assembly_get_image");
+    RM_il2cpp_image_get_name_t image_get_name = (RM_il2cpp_image_get_name_t)dlsym(RTLD_DEFAULT, "il2cpp_image_get_name");
+    if (!domain_get || !domain_get_assemblies || !assembly_get_image || !image_get_name) return NULL;
+    const void *domain = domain_get();
+    size_t count = 0;
+    const void **assemblies = domain_get_assemblies(domain, &count);
+    for (size_t i = 0; i < count; i++) {
+        const void *image = assembly_get_image(assemblies[i]);
+        const char *name = image ? image_get_name(image) : NULL;
+        if (name && [targetImageName isEqualToString:[NSString stringWithUTF8String:name]]) return image;
+    }
+    return NULL;
+}
+
+static void *RMResolveIl2CppMethodPointer(const char *namespaze, const char *className, const char *methodName, int argc) {
+    RM_il2cpp_class_from_name_t class_from_name = (RM_il2cpp_class_from_name_t)dlsym(RTLD_DEFAULT, "il2cpp_class_from_name");
+    RM_il2cpp_class_get_method_from_name_t class_get_method_from_name = (RM_il2cpp_class_get_method_from_name_t)dlsym(RTLD_DEFAULT, "il2cpp_class_get_method_from_name");
+    if (!class_from_name || !class_get_method_from_name) {
+        RMLog(@"[UNITYHOOK] missing class/method resolver class_from_name=%p get_method=%p", class_from_name, class_get_method_from_name);
+        return NULL;
+    }
+    const void *image = RMFindImageByName(@"Assembly-CSharp.dll");
+    if (!image) { RMLog(@"[UNITYHOOK] Assembly-CSharp.dll image not found"); return NULL; }
+    const void *klass = class_from_name(image, namespaze, className);
+    if (!klass) { RMLog(@"[UNITYHOOK] class not found %s.%s", namespaze, className); return NULL; }
+    const void *method = class_get_method_from_name(klass, methodName, argc);
+    if (!method) { RMLog(@"[UNITYHOOK] method not found %s.%s::%s/%d", namespaze, className, methodName, argc); return NULL; }
+    void *ptr = RMMethodPointer(method);
+    RMLog(@"[UNITYHOOK] resolved %s.%s::%s/%d methodInfo=%p ptr=%p", namespaze, className, methodName, argc, method, ptr);
+    return ptr;
+}
+
+static void RMUnityOnPurchaseFailHook(void *self, const void *method) {
+    RMLog(@"[UNITYHOOK] suppressed PurchaseStrategy.OnPurchaseFail self=%p", self);
+    return;
+}
+
+static void RMUnitySendPurchaseFailHook(void *self, void *a, void *b, void *c, const void *method) {
+    RMLog(@"[UNITYHOOK] suppressed PurchaseStrategy.SendPurchaseFail self=%p a=%p b=%p c=%p", self, a, b, c);
+    return;
+}
+
+static void RMInstallUnityFailHooks(void) {
+    @try {
+        RMLog(@"[UNITYHOOK] install start");
+        void *onFail = RMResolveIl2CppMethodPointer("Royal.Scenes.Home.Ui.Sections.Shop", "PurchaseStrategy", "OnPurchaseFail", 0);
+        if (onFail && !RMOrigUnityOnPurchaseFail) {
+            MSHookFunction(onFail, (void *)&RMUnityOnPurchaseFailHook, (void **)&RMOrigUnityOnPurchaseFail);
+            RMLog(@"[UNITYHOOK] hooked PurchaseStrategy.OnPurchaseFail ptr=%p", onFail);
+        }
+        void *sendFail = RMResolveIl2CppMethodPointer("Royal.Scenes.Home.Ui.Sections.Shop", "PurchaseStrategy", "SendPurchaseFail", 3);
+        if (sendFail && !RMOrigUnitySendPurchaseFail) {
+            MSHookFunction(sendFail, (void *)&RMUnitySendPurchaseFailHook, (void **)&RMOrigUnitySendPurchaseFail);
+            RMLog(@"[UNITYHOOK] hooked PurchaseStrategy.SendPurchaseFail ptr=%p", sendFail);
+        }
+        RMLog(@"[UNITYHOOK] install done");
+    } @catch (NSException *e) {
+        RMLog(@"[UNITYHOOK] install exception: %@", e);
+    }
 }
 
 static NSString *RMProductIDFromObject(id productIdentifier) {
@@ -496,6 +571,7 @@ __attribute__((constructor)) static void RMEntry(void) {
         }];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ RMInstallHook(); RMInstallFloatingMenu(); });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ RMProbeIl2CppRuntime(); });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(13 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ RMInstallUnityFailHooks(); });
         RMLog(@"tweak loaded log=%@", RMLogPath());
     }
 }
