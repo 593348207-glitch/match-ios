@@ -17,7 +17,11 @@ static IMP RMOrigTimeoutImp = NULL;
 static IMP RMOrigConsumeImp = NULL;
 static IMP RMOrigFinishImp = NULL;
 static void (*RMOrigUnityOnPurchaseFail)(void *self, const void *method) = NULL;
-static void (*RMOrigUnitySendPurchaseFail)(void *self, void *a, void *b, void *c, const void *method) = NULL;
+static void (*RMOrigUnitySendPurchaseFail)(void *self, void *config, void *purchaseResult, bool isRoyalFavorFromMoreLives, const void *method) = NULL;
+static void (*RMOrigUnityOnVerificationResult)(void *self, void *purchaseResult, const void *method) = NULL;
+static bool (*RMOrigUnityPurchaseResultIsSuccess)(void *self, const void *method) = NULL;
+static void (*RMUnitySendPurchaseSuccessFn)(void *self, void *config, void *purchaseResult, bool isRoyalFavorFromMoreLives, const void *method) = NULL;
+static const void *RMUnitySendPurchaseSuccessMethodInfo = NULL;
 static UIView *RMMenuView = nil;
 static UIButton *RMBallButton = nil;
 static id RMMenuController = nil;
@@ -208,7 +212,7 @@ static const void *RMFindImageByName(NSString *targetImageName) {
     return NULL;
 }
 
-static void *RMResolveIl2CppMethodPointer(const char *namespaze, const char *className, const char *methodName, int argc) {
+static const void *RMResolveIl2CppMethodInfo(const char *namespaze, const char *className, const char *methodName, int argc) {
     RM_il2cpp_class_from_name_t class_from_name = (RM_il2cpp_class_from_name_t)dlsym(RTLD_DEFAULT, "il2cpp_class_from_name");
     RM_il2cpp_class_get_method_from_name_t class_get_method_from_name = (RM_il2cpp_class_get_method_from_name_t)dlsym(RTLD_DEFAULT, "il2cpp_class_get_method_from_name");
     if (!class_from_name || !class_get_method_from_name) {
@@ -223,17 +227,74 @@ static void *RMResolveIl2CppMethodPointer(const char *namespaze, const char *cla
     if (!method) { RMLog(@"[UNITYHOOK] method not found %s.%s::%s/%d", namespaze, className, methodName, argc); return NULL; }
     void *ptr = RMMethodPointer(method);
     RMLog(@"[UNITYHOOK] resolved %s.%s::%s/%d methodInfo=%p ptr=%p", namespaze, className, methodName, argc, method, ptr);
-    return ptr;
+    return method;
+}
+
+static void *RMResolveIl2CppMethodPointer(const char *namespaze, const char *className, const char *methodName, int argc) {
+    const void *method = RMResolveIl2CppMethodInfo(namespaze, className, methodName, argc);
+    return RMMethodPointer(method);
+}
+
+static void RMForcePurchaseResultSuccess(void *purchaseResult, const char *reason) {
+    if (!purchaseResult) {
+        RMLog(@"[UNITYHOOK] cannot force PurchaseResult success reason=%s result=NULL", reason);
+        return;
+    }
+    int32_t *statusPtr = (int32_t *)purchaseResult;
+    int32_t oldStatus = *statusPtr;
+    *statusPtr = 3; // Royal.Infrastructure.Services.Native.Purchase.PurchaseStatus.VerificationSuccess
+    int64_t *timePtr = (int64_t *)((uint8_t *)purchaseResult + 0x8);
+    if (*timePtr == 0) *timePtr = (int64_t)([NSDate.date timeIntervalSince1970] * 1000.0);
+    void *txString = *((void **)((uint8_t *)purchaseResult + 0x10));
+    void *errString = *((void **)((uint8_t *)purchaseResult + 0x20));
+    RMLog(@"[UNITYHOOK] forced PurchaseResult.status %d->3 reason=%s result=%p time=%lld tx=%p err=%p", oldStatus, reason, purchaseResult, (long long)*timePtr, txString, errString);
 }
 
 static void RMUnityOnPurchaseFailHook(void *self, const void *method) {
+    if (!RMFreeIAPEnabled) {
+        if (RMOrigUnityOnPurchaseFail) RMOrigUnityOnPurchaseFail(self, method);
+        return;
+    }
     RMLog(@"[UNITYHOOK] suppressed PurchaseStrategy.OnPurchaseFail self=%p", self);
     return;
 }
 
-static void RMUnitySendPurchaseFailHook(void *self, void *a, void *b, void *c, const void *method) {
-    RMLog(@"[UNITYHOOK] suppressed PurchaseStrategy.SendPurchaseFail self=%p a=%p b=%p c=%p", self, a, b, c);
+static void RMUnitySendPurchaseFailHook(void *self, void *config, void *purchaseResult, bool isRoyalFavorFromMoreLives, const void *method) {
+    if (!RMFreeIAPEnabled) {
+        if (RMOrigUnitySendPurchaseFail) RMOrigUnitySendPurchaseFail(self, config, purchaseResult, isRoyalFavorFromMoreLives, method);
+        return;
+    }
+    RMLog(@"[UNITYHOOK] intercepted PurchaseStrategy.SendPurchaseFail self=%p config=%p result=%p royalFavor=%d", self, config, purchaseResult, isRoyalFavorFromMoreLives ? 1 : 0);
+    RMForcePurchaseResultSuccess(purchaseResult, "SendPurchaseFail");
+    if (RMUnitySendPurchaseSuccessFn) {
+        RMLog(@"[UNITYHOOK] converted PurchaseStrategy.SendPurchaseFail -> SendPurchaseSuccess self=%p", self);
+        RMUnitySendPurchaseSuccessFn(self, config, purchaseResult, isRoyalFavorFromMoreLives, RMUnitySendPurchaseSuccessMethodInfo ? RMUnitySendPurchaseSuccessMethodInfo : method);
+        return;
+    }
+    RMLog(@"[UNITYHOOK] suppressed PurchaseStrategy.SendPurchaseFail without SendPurchaseSuccess fallback self=%p", self);
     return;
+}
+
+static void RMUnityOnVerificationResultHook(void *self, void *purchaseResult, const void *method) {
+    if (RMFreeIAPEnabled) RMForcePurchaseResultSuccess(purchaseResult, "PurchaseManager.OnVerificationResult");
+    if (RMOrigUnityOnVerificationResult) RMOrigUnityOnVerificationResult(self, purchaseResult, method);
+}
+
+static bool RMUnityPurchaseResultIsSuccessHook(void *self, const void *method) {
+    if (RMFreeIAPEnabled && self) {
+        static NSUInteger logCount = 0;
+        int32_t oldStatus = *((int32_t *)self);
+        if (oldStatus != 3) {
+            RMForcePurchaseResultSuccess(self, "PurchaseResult.get_IsSuccess");
+            if (logCount < 20) {
+                RMLog(@"[UNITYHOOK] forced PurchaseResult.IsSuccess=YES self=%p oldStatus=%d", self, oldStatus);
+                logCount++;
+            }
+        }
+        return true;
+    }
+    if (RMOrigUnityPurchaseResultIsSuccess) return RMOrigUnityPurchaseResultIsSuccess(self, method);
+    return self && *((int32_t *)self) == 3;
 }
 
 static void RMInstallUnityFailHooks(void) {
@@ -248,6 +309,20 @@ static void RMInstallUnityFailHooks(void) {
         if (sendFail && !RMOrigUnitySendPurchaseFail) {
             MSHookFunction(sendFail, (void *)&RMUnitySendPurchaseFailHook, (void **)&RMOrigUnitySendPurchaseFail);
             RMLog(@"[UNITYHOOK] hooked PurchaseStrategy.SendPurchaseFail ptr=%p", sendFail);
+        }
+        RMUnitySendPurchaseSuccessMethodInfo = RMResolveIl2CppMethodInfo("Royal.Scenes.Home.Ui.Sections.Shop", "PurchaseStrategy", "SendPurchaseSuccess", 3);
+        RMUnitySendPurchaseSuccessFn = (void (*)(void *, void *, void *, bool, const void *))RMMethodPointer(RMUnitySendPurchaseSuccessMethodInfo);
+        if (RMUnitySendPurchaseSuccessFn) RMLog(@"[UNITYHOOK] resolved PurchaseStrategy.SendPurchaseSuccess fn=%p methodInfo=%p", RMUnitySendPurchaseSuccessFn, RMUnitySendPurchaseSuccessMethodInfo);
+
+        void *onVerificationResult = RMResolveIl2CppMethodPointer("Royal.Infrastructure.Services.Native.Purchase", "PurchaseManager", "OnVerificationResult", 1);
+        if (onVerificationResult && !RMOrigUnityOnVerificationResult) {
+            MSHookFunction(onVerificationResult, (void *)&RMUnityOnVerificationResultHook, (void **)&RMOrigUnityOnVerificationResult);
+            RMLog(@"[UNITYHOOK] hooked PurchaseManager.OnVerificationResult ptr=%p", onVerificationResult);
+        }
+        void *isSuccess = RMResolveIl2CppMethodPointer("Royal.Infrastructure.Services.Native.Purchase", "PurchaseResult", "get_IsSuccess", 0);
+        if (isSuccess && !RMOrigUnityPurchaseResultIsSuccess) {
+            MSHookFunction(isSuccess, (void *)&RMUnityPurchaseResultIsSuccessHook, (void **)&RMOrigUnityPurchaseResultIsSuccess);
+            RMLog(@"[UNITYHOOK] hooked PurchaseResult.get_IsSuccess ptr=%p", isSuccess);
         }
         RMLog(@"[UNITYHOOK] install done");
     } @catch (NSException *e) {
