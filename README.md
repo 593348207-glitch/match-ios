@@ -27,6 +27,10 @@ log stream --predicate 'process == "RoyalMatch" OR eventMessage CONTAINS "RM-IAP
 
 The floating ball is visible, the menu is collapsed, and the Free IAP switch is OFF by default. Tap the IAP ball and enable it manually when needed.
 
-## 1.0.8 fix
+## 1.0.9 fix
 
 The hook now sets DGPurchaseManager.startPurchaseCalled=YES before complete:retry:NO, matching the native success path and preventing the purchase spinner from waiting forever.
+
+## 1.0.9 probe
+
+Adds IL2CPP runtime class/method enumeration for purchase, shop package, inventory, verifier, reward, booster, coin and UserGameData symbols. Probe output is written to `Documents/RoyalMatchIAPHook.log`.

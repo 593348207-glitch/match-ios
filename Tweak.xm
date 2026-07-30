@@ -5,6 +5,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <substrate.h>
+#import <dlfcn.h>
 
 static BOOL RMFreeIAPEnabled = NO;
 static NSString * const RMEnabledKey = @"rm_hook_free_iap_enabled_v103";
@@ -84,6 +85,92 @@ static void RMLog(NSString *fmt, ...) {
     NSString *line = [NSString stringWithFormat:@"[%@] [RM-IAP] %@", [NSDate date], msg];
     NSLog(@"%@", line);
     RMAppendFileLog(line);
+}
+
+typedef const void *(*RM_il2cpp_domain_get_t)(void);
+typedef const void **(*RM_il2cpp_domain_get_assemblies_t)(const void *domain, size_t *size);
+typedef const void *(*RM_il2cpp_assembly_get_image_t)(const void *assembly);
+typedef const char *(*RM_il2cpp_image_get_name_t)(const void *image);
+typedef size_t (*RM_il2cpp_image_get_class_count_t)(const void *image);
+typedef const void *(*RM_il2cpp_image_get_class_t)(const void *image, size_t index);
+typedef const char *(*RM_il2cpp_class_get_name_t)(const void *klass);
+typedef const char *(*RM_il2cpp_class_get_namespace_t)(const void *klass);
+typedef const void *(*RM_il2cpp_class_get_methods_t)(const void *klass, void **iter);
+typedef const char *(*RM_il2cpp_method_get_name_t)(const void *method);
+typedef uint32_t (*RM_il2cpp_method_get_param_count_t)(const void *method);
+
+static BOOL RMKeywordHit(NSString *s) {
+    if (s.length == 0) return NO;
+    NSString *l = s.lowercaseString;
+    NSArray *keys = @[@"purchase", @"shoppackage", @"inventorypackage", @"usergamedata", @"verification", @"verifier", @"rewardtype", @"booster", @"nativepayment", @"iap", @"coins"];
+    for (NSString *k in keys) if ([l containsString:k]) return YES;
+    return NO;
+}
+
+static void RMProbeIl2CppRuntime(void) {
+    @try {
+        RMLog(@"[IL2CPP] probe start");
+        RM_il2cpp_domain_get_t domain_get = (RM_il2cpp_domain_get_t)dlsym(RTLD_DEFAULT, "il2cpp_domain_get");
+        RM_il2cpp_domain_get_assemblies_t domain_get_assemblies = (RM_il2cpp_domain_get_assemblies_t)dlsym(RTLD_DEFAULT, "il2cpp_domain_get_assemblies");
+        RM_il2cpp_assembly_get_image_t assembly_get_image = (RM_il2cpp_assembly_get_image_t)dlsym(RTLD_DEFAULT, "il2cpp_assembly_get_image");
+        RM_il2cpp_image_get_name_t image_get_name = (RM_il2cpp_image_get_name_t)dlsym(RTLD_DEFAULT, "il2cpp_image_get_name");
+        RM_il2cpp_image_get_class_count_t image_get_class_count = (RM_il2cpp_image_get_class_count_t)dlsym(RTLD_DEFAULT, "il2cpp_image_get_class_count");
+        RM_il2cpp_image_get_class_t image_get_class = (RM_il2cpp_image_get_class_t)dlsym(RTLD_DEFAULT, "il2cpp_image_get_class");
+        RM_il2cpp_class_get_name_t class_get_name = (RM_il2cpp_class_get_name_t)dlsym(RTLD_DEFAULT, "il2cpp_class_get_name");
+        RM_il2cpp_class_get_namespace_t class_get_namespace = (RM_il2cpp_class_get_namespace_t)dlsym(RTLD_DEFAULT, "il2cpp_class_get_namespace");
+        RM_il2cpp_class_get_methods_t class_get_methods = (RM_il2cpp_class_get_methods_t)dlsym(RTLD_DEFAULT, "il2cpp_class_get_methods");
+        RM_il2cpp_method_get_name_t method_get_name = (RM_il2cpp_method_get_name_t)dlsym(RTLD_DEFAULT, "il2cpp_method_get_name");
+        RM_il2cpp_method_get_param_count_t method_get_param_count = (RM_il2cpp_method_get_param_count_t)dlsym(RTLD_DEFAULT, "il2cpp_method_get_param_count");
+
+        if (!domain_get || !domain_get_assemblies || !assembly_get_image || !image_get_name || !image_get_class_count || !image_get_class || !class_get_name || !class_get_namespace || !class_get_methods || !method_get_name) {
+            RMLog(@"[IL2CPP] missing api domain=%p assemblies=%p asm_image=%p image_name=%p class_count=%p image_class=%p class_name=%p class_ns=%p class_methods=%p method_name=%p", domain_get, domain_get_assemblies, assembly_get_image, image_get_name, image_get_class_count, image_get_class, class_get_name, class_get_namespace, class_get_methods, method_get_name);
+            return;
+        }
+
+        const void *domain = domain_get();
+        size_t asmCount = 0;
+        const void **assemblies = domain_get_assemblies(domain, &asmCount);
+        RMLog(@"[IL2CPP] domain=%p assemblies=%zu", domain, asmCount);
+        NSUInteger classHits = 0;
+        NSUInteger methodHits = 0;
+        NSUInteger maxLines = 650;
+
+        for (size_t ai = 0; ai < asmCount && (classHits + methodHits) < maxLines; ai++) {
+            const void *image = assembly_get_image(assemblies[ai]);
+            if (!image) continue;
+            const char *imageNameC = image_get_name(image);
+            NSString *imageName = imageNameC ? [NSString stringWithUTF8String:imageNameC] : @"";
+            size_t classCount = image_get_class_count(image);
+            for (size_t ci = 0; ci < classCount && (classHits + methodHits) < maxLines; ci++) {
+                const void *klass = image_get_class(image, ci);
+                if (!klass) continue;
+                const char *cn = class_get_name(klass);
+                const char *ns = class_get_namespace(klass);
+                NSString *className = cn ? [NSString stringWithUTF8String:cn] : @"";
+                NSString *nsName = ns ? [NSString stringWithUTF8String:ns] : @"";
+                NSString *fullClass = nsName.length ? [NSString stringWithFormat:@"%@.%@", nsName, className] : className;
+                BOOL classMatch = RMKeywordHit(fullClass);
+                if (classMatch) {
+                    RMLog(@"[IL2CPP] class image=%@ ns=%@ class=%@", imageName, nsName, className);
+                    classHits++;
+                }
+                void *iter = NULL;
+                const void *method = NULL;
+                while ((method = class_get_methods(klass, &iter)) && (classHits + methodHits) < maxLines) {
+                    const char *mn = method_get_name(method);
+                    NSString *methodName = mn ? [NSString stringWithUTF8String:mn] : @"";
+                    if (classMatch || RMKeywordHit(methodName)) {
+                        uint32_t argc = method_get_param_count ? method_get_param_count(method) : 0;
+                        RMLog(@"[IL2CPP] method %@::%@ argc=%u method=%p", fullClass, methodName, argc, method);
+                        methodHits++;
+                    }
+                }
+            }
+        }
+        RMLog(@"[IL2CPP] probe done classHits=%lu methodHits=%lu", (unsigned long)classHits, (unsigned long)methodHits);
+    } @catch (NSException *e) {
+        RMLog(@"[IL2CPP] probe exception: %@", e);
+    }
 }
 
 static void RMSaveEnabled(BOOL enabled) {
@@ -408,6 +495,7 @@ __attribute__((constructor)) static void RMEntry(void) {
             RMInstallHook(); RMInstallFloatingMenu();
         }];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ RMInstallHook(); RMInstallFloatingMenu(); });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ RMProbeIl2CppRuntime(); });
         RMLog(@"tweak loaded log=%@", RMLogPath());
     }
 }
