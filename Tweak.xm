@@ -22,6 +22,38 @@ static void (*RMOrigUnityOnVerificationResult)(void *self, void *purchaseResult,
 static bool (*RMOrigUnityPurchaseResultIsSuccess)(void *self, const void *method) = NULL;
 static void (*RMUnitySendPurchaseSuccessFn)(void *self, void *config, void *purchaseResult, bool isRoyalFavorFromMoreLives, const void *method) = NULL;
 static const void *RMUnitySendPurchaseSuccessMethodInfo = NULL;
+static void (*RMOrigUnitySendPurchaseSuccess)(void *self, void *config, void *purchaseResult, bool isRoyalFavorFromMoreLives, const void *method) = NULL;
+static void (*RMUserInventoryAddCoinsFn)(void *self, int delta, bool shouldUpdateMissionProgress, const void *method) = NULL;
+static void (*RMUserInventoryAddBoosterFn)(void *self, int boosterType, int delta, const void *method) = NULL;
+static void (*RMUserInventoryAddTimeFn)(void *self, int boosterType, int deltaSeconds, const void *method) = NULL;
+static void (*RMUserInventoryAddInGameBoosterTimeFn)(void *self, int boosterType, int deltaSeconds, const void *method) = NULL;
+static void *(*RMUserManagerGetCurrentUserFn)(const void *method) = NULL;
+static int (*RMShopPackageGetTotalCoinsWithBonusFn)(void *config, const void *method) = NULL;
+static const void *RMUserInventoryAddCoinsMethodInfo = NULL;
+static const void *RMUserInventoryAddBoosterMethodInfo = NULL;
+static const void *RMUserInventoryAddTimeMethodInfo = NULL;
+static const void *RMUserInventoryAddInGameBoosterTimeMethodInfo = NULL;
+static const void *RMUserManagerGetCurrentUserMethodInfo = NULL;
+static const void *RMShopPackageGetTotalCoinsWithBonusMethodInfo = NULL;
+static void (*RMOrigUserInventoryUpdateCoins)(void *self, int newCoins, const void *method) = NULL;
+static void (*RMOrigUserInventorySetCoins)(void *self, int value, const void *method) = NULL;
+static void (*RMOrigUserInventoryUpdateInGameInventory)(void *self, int64_t value, const void *method) = NULL;
+static void (*RMOrigUserInventoryUpdatePreLevelInventory)(void *self, int64_t value, const void *method) = NULL;
+static void (*RMOrigUserInventoryUpdateRemainingBoosterTimes)(void *self, int64_t value, const void *method) = NULL;
+static void (*RMOrigUserInventoryUpdateRocketEndTime)(void *self, int value, const void *method) = NULL;
+static void (*RMOrigUserInventoryUpdateTntEndTime)(void *self, int value, const void *method) = NULL;
+static void (*RMOrigUserInventoryUpdateLightballEndTime)(void *self, int value, const void *method) = NULL;
+static int32_t RMMaxCoins = 0;
+static int64_t RMMaxInGameInventory = 0;
+static int64_t RMMaxPreLevelInventory = 0;
+static int64_t RMMaxRemainingBoosterTimes = 0;
+static int32_t RMMaxRocketEndTime = 0;
+static int32_t RMMaxTntEndTime = 0;
+static int32_t RMMaxLightballEndTime = 0;
+static NSTimeInterval RMGrantProtectUntil = 0;
+static NSUInteger RMPurchaseSequence = 0;
+static NSUInteger RMLastGrantSequence = 0;
+static BOOL RMUnityGrantHooksInstalled = NO;
 static UIView *RMMenuView = nil;
 static UIButton *RMBallButton = nil;
 static id RMMenuController = nil;
@@ -250,6 +282,9 @@ static void RMForcePurchaseResultSuccess(void *purchaseResult, const char *reaso
     RMLog(@"[UNITYHOOK] forced PurchaseResult.status %d->3 reason=%s result=%p time=%lld tx=%p err=%p", oldStatus, reason, purchaseResult, (long long)*timePtr, txString, errString);
 }
 
+static void RMGrantRewardsFromShopConfig(void *config, void *purchaseResult, const char *reason);
+static void RMUnitySendPurchaseSuccessHook(void *self, void *config, void *purchaseResult, bool isRoyalFavorFromMoreLives, const void *method);
+
 static void RMUnityOnPurchaseFailHook(void *self, const void *method) {
     if (!RMFreeIAPEnabled) {
         if (RMOrigUnityOnPurchaseFail) RMOrigUnityOnPurchaseFail(self, method);
@@ -266,11 +301,12 @@ static void RMUnitySendPurchaseFailHook(void *self, void *config, void *purchase
     }
     RMLog(@"[UNITYHOOK] intercepted PurchaseStrategy.SendPurchaseFail self=%p config=%p result=%p royalFavor=%d", self, config, purchaseResult, isRoyalFavorFromMoreLives ? 1 : 0);
     RMForcePurchaseResultSuccess(purchaseResult, "SendPurchaseFail");
-    if (RMUnitySendPurchaseSuccessFn) {
+    if (RMOrigUnitySendPurchaseSuccess || RMUnitySendPurchaseSuccessFn) {
         RMLog(@"[UNITYHOOK] converted PurchaseStrategy.SendPurchaseFail -> SendPurchaseSuccess self=%p", self);
-        RMUnitySendPurchaseSuccessFn(self, config, purchaseResult, isRoyalFavorFromMoreLives, RMUnitySendPurchaseSuccessMethodInfo ? RMUnitySendPurchaseSuccessMethodInfo : method);
+        RMUnitySendPurchaseSuccessHook(self, config, purchaseResult, isRoyalFavorFromMoreLives, RMUnitySendPurchaseSuccessMethodInfo ? RMUnitySendPurchaseSuccessMethodInfo : method);
         return;
     }
+    RMGrantRewardsFromShopConfig(config, purchaseResult, "SendPurchaseFail-no-success-fn");
     RMLog(@"[UNITYHOOK] suppressed PurchaseStrategy.SendPurchaseFail without SendPurchaseSuccess fallback self=%p", self);
     return;
 }
@@ -279,6 +315,144 @@ static void RMUnityOnVerificationResultHook(void *self, void *purchaseResult, co
     if (RMFreeIAPEnabled) RMForcePurchaseResultSuccess(purchaseResult, "PurchaseManager.OnVerificationResult");
     if (RMOrigUnityOnVerificationResult) RMOrigUnityOnVerificationResult(self, purchaseResult, method);
 }
+
+static int32_t RMReadI32(void *base, ptrdiff_t off) {
+    if (!base) return 0;
+    return *((int32_t *)((uint8_t *)base + off));
+}
+
+static void RMUpdateInventoryMax(void *inventory, const char *reason) {
+    if (!inventory) return;
+    int32_t coins = RMReadI32(inventory, 0x10);
+    int64_t inGame = *((int64_t *)((uint8_t *)inventory + 0x28));
+    int64_t preLevel = *((int64_t *)((uint8_t *)inventory + 0x30));
+    int32_t rocketEnd = RMReadI32(inventory, 0x38);
+    int32_t tntEnd = RMReadI32(inventory, 0x3C);
+    int32_t lightEnd = RMReadI32(inventory, 0x40);
+    int64_t remaining = *((int64_t *)((uint8_t *)inventory + 0x48));
+    if (coins > RMMaxCoins) RMMaxCoins = coins;
+    if (inGame > RMMaxInGameInventory) RMMaxInGameInventory = inGame;
+    if (preLevel > RMMaxPreLevelInventory) RMMaxPreLevelInventory = preLevel;
+    if (rocketEnd > RMMaxRocketEndTime) RMMaxRocketEndTime = rocketEnd;
+    if (tntEnd > RMMaxTntEndTime) RMMaxTntEndTime = tntEnd;
+    if (lightEnd > RMMaxLightballEndTime) RMMaxLightballEndTime = lightEnd;
+    if (remaining > RMMaxRemainingBoosterTimes) RMMaxRemainingBoosterTimes = remaining;
+    RMLog(@"[GRANT] inventory max reason=%s inv=%p coins=%d inGame=%lld preLevel=%lld rocketEnd=%d tntEnd=%d lightEnd=%d remaining=%lld", reason, inventory, RMMaxCoins, (long long)RMMaxInGameInventory, (long long)RMMaxPreLevelInventory, RMMaxRocketEndTime, RMMaxTntEndTime, RMMaxLightballEndTime, (long long)RMMaxRemainingBoosterTimes);
+}
+
+static BOOL RMShouldProtectGrantedInventory(void) {
+    return RMFreeIAPEnabled || [NSDate.date timeIntervalSince1970] < RMGrantProtectUntil;
+}
+
+static void *RMCurrentUserInventory(void) {
+    @try {
+        if (!RMUserManagerGetCurrentUserFn || !RMUserManagerGetCurrentUserMethodInfo) {
+            RMUserManagerGetCurrentUserMethodInfo = RMResolveIl2CppMethodInfo("Royal.Player.Context.Units", "UserManager", "get_CurrentUser", 0);
+            RMUserManagerGetCurrentUserFn = (void *(*)(const void *))RMMethodPointer(RMUserManagerGetCurrentUserMethodInfo);
+            RMLog(@"[GRANT] resolved UserManager.get_CurrentUser fn=%p methodInfo=%p", RMUserManagerGetCurrentUserFn, RMUserManagerGetCurrentUserMethodInfo);
+        }
+        void *user = RMUserManagerGetCurrentUserFn ? RMUserManagerGetCurrentUserFn(RMUserManagerGetCurrentUserMethodInfo) : NULL;
+        void *inventory = user ? *((void **)((uint8_t *)user + 0x20)) : NULL;
+        RMLog(@"[GRANT] current user=%p inventory=%p", user, inventory);
+        return inventory;
+    } @catch (NSException *e) {
+        RMLog(@"[GRANT] current inventory exception: %@", e);
+        return NULL;
+    }
+}
+
+static void RMGrantBoosterAmount(void *inventory, int boosterType, int amount, const char *name) {
+    if (!inventory || amount <= 0) return;
+    if (RMUserInventoryAddBoosterFn) {
+        RMUserInventoryAddBoosterFn(inventory, boosterType, amount, RMUserInventoryAddBoosterMethodInfo);
+        RMLog(@"[GRANT] AddBooster %s type=%d amount=%d", name, boosterType, amount);
+    } else {
+        RMLog(@"[GRANT] AddBooster missing %s type=%d amount=%d", name, boosterType, amount);
+    }
+}
+
+static void RMGrantBoosterMinutes(void *inventory, int boosterType, int minutes, BOOL inGame, const char *name) {
+    if (!inventory || minutes <= 0) return;
+    int seconds = minutes * 60;
+    if (inGame && RMUserInventoryAddInGameBoosterTimeFn) {
+        RMUserInventoryAddInGameBoosterTimeFn(inventory, boosterType, seconds, RMUserInventoryAddInGameBoosterTimeMethodInfo);
+        RMLog(@"[GRANT] AddInGameBoosterTime %s type=%d minutes=%d", name, boosterType, minutes);
+    } else if (!inGame && RMUserInventoryAddTimeFn) {
+        RMUserInventoryAddTimeFn(inventory, boosterType, seconds, RMUserInventoryAddTimeMethodInfo);
+        RMLog(@"[GRANT] AddTime %s type=%d minutes=%d", name, boosterType, minutes);
+    } else {
+        RMLog(@"[GRANT] booster time fn missing %s type=%d minutes=%d inGame=%d", name, boosterType, minutes, inGame ? 1 : 0);
+    }
+}
+
+static void RMGrantRewardsFromShopConfig(void *config, void *purchaseResult, const char *reason) {
+    if (!RMFreeIAPEnabled) return;
+    if (!config) { RMLog(@"[GRANT] no config reason=%s result=%p", reason, purchaseResult); return; }
+    if (RMPurchaseSequence != 0 && RMLastGrantSequence == RMPurchaseSequence) {
+        RMLog(@"[GRANT] skip duplicate seq=%lu reason=%s config=%p result=%p", (unsigned long)RMPurchaseSequence, reason, config, purchaseResult);
+        return;
+    }
+    void *inventory = RMCurrentUserInventory();
+    if (!inventory) { RMLog(@"[GRANT] inventory unavailable reason=%s config=%p result=%p", reason, config, purchaseResult); return; }
+
+    int coins = RMReadI32(config, 0x48);
+    if (RMShopPackageGetTotalCoinsWithBonusFn && RMShopPackageGetTotalCoinsWithBonusMethodInfo) {
+        int total = RMShopPackageGetTotalCoinsWithBonusFn(config, RMShopPackageGetTotalCoinsWithBonusMethodInfo);
+        if (total > coins) coins = total;
+    }
+    int hammerAmount = RMReadI32(config, 0x4C);
+    int hammerMinutes = RMReadI32(config, 0x50);
+    int cannonAmount = RMReadI32(config, 0x54);
+    int cannonMinutes = RMReadI32(config, 0x58);
+    int arrowAmount = RMReadI32(config, 0x5C);
+    int arrowMinutes = RMReadI32(config, 0x60);
+    int jesterAmount = RMReadI32(config, 0x64);
+    int jesterMinutes = RMReadI32(config, 0x68);
+    int rocketAmount = RMReadI32(config, 0x6C);
+    int rocketMinutes = RMReadI32(config, 0x70);
+    int tntAmount = RMReadI32(config, 0x74);
+    int tntMinutes = RMReadI32(config, 0x78);
+    int lightAmount = RMReadI32(config, 0x7C);
+    int elixirAmount = RMReadI32(config, 0x80);
+    int lightMinutes = RMReadI32(config, 0x84);
+    int lifeMinutes = RMReadI32(config, 0x88);
+
+    RMLog(@"[GRANT] start seq=%lu reason=%s config=%p result=%p coins=%d rocket=%d/%dm tnt=%d/%dm light=%d/%dm hammer=%d/%dm arrow=%d/%dm cannon=%d/%dm jester=%d/%dm elixir=%d lifeMin=%d", (unsigned long)RMPurchaseSequence, reason, config, purchaseResult, coins, rocketAmount, rocketMinutes, tntAmount, tntMinutes, lightAmount, lightMinutes, hammerAmount, hammerMinutes, arrowAmount, arrowMinutes, cannonAmount, cannonMinutes, jesterAmount, jesterMinutes, elixirAmount, lifeMinutes);
+
+    RMUpdateInventoryMax(inventory, "before-grant");
+    if (coins > 0 && RMUserInventoryAddCoinsFn) {
+        RMUserInventoryAddCoinsFn(inventory, coins, true, RMUserInventoryAddCoinsMethodInfo);
+        RMLog(@"[GRANT] AddCoins delta=%d", coins);
+    }
+    RMGrantBoosterAmount(inventory, 1, rocketAmount, "Rocket");
+    RMGrantBoosterAmount(inventory, 2, tntAmount, "Tnt");
+    RMGrantBoosterAmount(inventory, 3, lightAmount, "LightBall");
+    RMGrantBoosterAmount(inventory, 4, hammerAmount, "Hammer");
+    RMGrantBoosterAmount(inventory, 5, arrowAmount, "Arrow");
+    RMGrantBoosterAmount(inventory, 6, cannonAmount, "Cannon");
+    RMGrantBoosterAmount(inventory, 7, jesterAmount, "JesterHat");
+    RMGrantBoosterMinutes(inventory, 1, rocketMinutes, NO, "Rocket");
+    RMGrantBoosterMinutes(inventory, 2, tntMinutes, NO, "Tnt");
+    RMGrantBoosterMinutes(inventory, 3, lightMinutes, NO, "LightBall");
+    RMGrantBoosterMinutes(inventory, 4, hammerMinutes, YES, "Hammer");
+    RMGrantBoosterMinutes(inventory, 5, arrowMinutes, YES, "Arrow");
+    RMGrantBoosterMinutes(inventory, 6, cannonMinutes, YES, "Cannon");
+    RMGrantBoosterMinutes(inventory, 7, jesterMinutes, YES, "JesterHat");
+
+    RMUpdateInventoryMax(inventory, "after-grant");
+    RMGrantProtectUntil = [NSDate.date timeIntervalSince1970] + 600.0;
+    RMLastGrantSequence = RMPurchaseSequence;
+    RMLog(@"[GRANT] done seq=%lu protectUntil=%.0f", (unsigned long)RMLastGrantSequence, RMGrantProtectUntil);
+}
+
+static void RMUnitySendPurchaseSuccessHook(void *self, void *config, void *purchaseResult, bool isRoyalFavorFromMoreLives, const void *method) {
+    if (RMFreeIAPEnabled) {
+        RMForcePurchaseResultSuccess(purchaseResult, "PurchaseStrategy.SendPurchaseSuccess");
+        RMGrantRewardsFromShopConfig(config, purchaseResult, "SendPurchaseSuccess");
+    }
+    if (RMOrigUnitySendPurchaseSuccess) RMOrigUnitySendPurchaseSuccess(self, config, purchaseResult, isRoyalFavorFromMoreLives, method);
+}
+
 
 static bool RMUnityPurchaseResultIsSuccessHook(void *self, const void *method) {
     if (RMFreeIAPEnabled && self) {
@@ -297,6 +471,107 @@ static bool RMUnityPurchaseResultIsSuccessHook(void *self, const void *method) {
     return self && *((int32_t *)self) == 3;
 }
 
+
+static void RMUserInventoryUpdateCoinsHook(void *self, int newCoins, const void *method) {
+    if (RMShouldProtectGrantedInventory() && newCoins < RMMaxCoins) {
+        RMLog(@"[NOROLLBACK] UpdateCoins clamp %d -> %d", newCoins, RMMaxCoins);
+        newCoins = RMMaxCoins;
+    }
+    if (RMOrigUserInventoryUpdateCoins) RMOrigUserInventoryUpdateCoins(self, newCoins, method);
+    RMUpdateInventoryMax(self, "UpdateCoins");
+}
+
+static void RMUserInventorySetCoinsHook(void *self, int value, const void *method) {
+    if (RMShouldProtectGrantedInventory() && value < RMMaxCoins) {
+        RMLog(@"[NOROLLBACK] set_Coins clamp %d -> %d", value, RMMaxCoins);
+        value = RMMaxCoins;
+    }
+    if (RMOrigUserInventorySetCoins) RMOrigUserInventorySetCoins(self, value, method);
+    RMUpdateInventoryMax(self, "set_Coins");
+}
+
+static void RMUserInventoryUpdateInGameInventoryHook(void *self, int64_t value, const void *method) {
+    if (RMShouldProtectGrantedInventory() && value < RMMaxInGameInventory) {
+        RMLog(@"[NOROLLBACK] UpdateInGameInventory clamp %lld -> %lld", (long long)value, (long long)RMMaxInGameInventory);
+        value = RMMaxInGameInventory;
+    }
+    if (RMOrigUserInventoryUpdateInGameInventory) RMOrigUserInventoryUpdateInGameInventory(self, value, method);
+    RMUpdateInventoryMax(self, "UpdateInGameInventory");
+}
+
+static void RMUserInventoryUpdatePreLevelInventoryHook(void *self, int64_t value, const void *method) {
+    if (RMShouldProtectGrantedInventory() && value < RMMaxPreLevelInventory) {
+        RMLog(@"[NOROLLBACK] UpdatePreLevelInventory clamp %lld -> %lld", (long long)value, (long long)RMMaxPreLevelInventory);
+        value = RMMaxPreLevelInventory;
+    }
+    if (RMOrigUserInventoryUpdatePreLevelInventory) RMOrigUserInventoryUpdatePreLevelInventory(self, value, method);
+    RMUpdateInventoryMax(self, "UpdatePreLevelInventory");
+}
+
+static void RMUserInventoryUpdateRemainingBoosterTimesHook(void *self, int64_t value, const void *method) {
+    if (RMShouldProtectGrantedInventory() && value < RMMaxRemainingBoosterTimes) {
+        RMLog(@"[NOROLLBACK] UpdateRemainingBoosterTimes clamp %lld -> %lld", (long long)value, (long long)RMMaxRemainingBoosterTimes);
+        value = RMMaxRemainingBoosterTimes;
+    }
+    if (RMOrigUserInventoryUpdateRemainingBoosterTimes) RMOrigUserInventoryUpdateRemainingBoosterTimes(self, value, method);
+    RMUpdateInventoryMax(self, "UpdateRemainingBoosterTimes");
+}
+
+static void RMUserInventoryUpdateRocketEndTimeHook(void *self, int value, const void *method) {
+    if (RMShouldProtectGrantedInventory() && value < RMMaxRocketEndTime) { RMLog(@"[NOROLLBACK] UpdateRocketEndTime clamp %d -> %d", value, RMMaxRocketEndTime); value = RMMaxRocketEndTime; }
+    if (RMOrigUserInventoryUpdateRocketEndTime) RMOrigUserInventoryUpdateRocketEndTime(self, value, method);
+    RMUpdateInventoryMax(self, "UpdateRocketEndTime");
+}
+
+static void RMUserInventoryUpdateTntEndTimeHook(void *self, int value, const void *method) {
+    if (RMShouldProtectGrantedInventory() && value < RMMaxTntEndTime) { RMLog(@"[NOROLLBACK] UpdateTntEndTime clamp %d -> %d", value, RMMaxTntEndTime); value = RMMaxTntEndTime; }
+    if (RMOrigUserInventoryUpdateTntEndTime) RMOrigUserInventoryUpdateTntEndTime(self, value, method);
+    RMUpdateInventoryMax(self, "UpdateTntEndTime");
+}
+
+static void RMUserInventoryUpdateLightballEndTimeHook(void *self, int value, const void *method) {
+    if (RMShouldProtectGrantedInventory() && value < RMMaxLightballEndTime) { RMLog(@"[NOROLLBACK] UpdateLightballEndTime clamp %d -> %d", value, RMMaxLightballEndTime); value = RMMaxLightballEndTime; }
+    if (RMOrigUserInventoryUpdateLightballEndTime) RMOrigUserInventoryUpdateLightballEndTime(self, value, method);
+    RMUpdateInventoryMax(self, "UpdateLightballEndTime");
+}
+
+static void RMHookIl2CppFunction(const char *ns, const char *klass, const char *name, int argc, void *hook, void **orig, NSString *label) {
+    void *ptr = RMResolveIl2CppMethodPointer(ns, klass, name, argc);
+    if (ptr && orig && !*orig) {
+        MSHookFunction(ptr, hook, orig);
+        RMLog(@"[UNITYHOOK] hooked %@ ptr=%p", label, ptr);
+    }
+}
+
+static void RMInstallUnityGrantHooks(void) {
+    if (RMUnityGrantHooksInstalled) return;
+    @try {
+        RMUserInventoryAddCoinsMethodInfo = RMResolveIl2CppMethodInfo("Royal.Player.Context.Data.Persistent", "UserInventory", "AddCoins", 2);
+        RMUserInventoryAddCoinsFn = (void (*)(void *, int, bool, const void *))RMMethodPointer(RMUserInventoryAddCoinsMethodInfo);
+        RMUserInventoryAddBoosterMethodInfo = RMResolveIl2CppMethodInfo("Royal.Player.Context.Data.Persistent", "UserInventory", "AddBooster", 2);
+        RMUserInventoryAddBoosterFn = (void (*)(void *, int, int, const void *))RMMethodPointer(RMUserInventoryAddBoosterMethodInfo);
+        RMUserInventoryAddTimeMethodInfo = RMResolveIl2CppMethodInfo("Royal.Player.Context.Data.Persistent", "UserInventory", "AddTime", 2);
+        RMUserInventoryAddTimeFn = (void (*)(void *, int, int, const void *))RMMethodPointer(RMUserInventoryAddTimeMethodInfo);
+        RMUserInventoryAddInGameBoosterTimeMethodInfo = RMResolveIl2CppMethodInfo("Royal.Player.Context.Data.Persistent", "UserInventory", "AddInGameBoosterTime", 2);
+        RMUserInventoryAddInGameBoosterTimeFn = (void (*)(void *, int, int, const void *))RMMethodPointer(RMUserInventoryAddInGameBoosterTimeMethodInfo);
+        RMShopPackageGetTotalCoinsWithBonusMethodInfo = RMResolveIl2CppMethodInfo("Royal.Scenes.Home.Ui.Sections.Shop.Package", "ShopPackageConfig", "get_TotalCoinsWithBonus", 0);
+        RMShopPackageGetTotalCoinsWithBonusFn = (int (*)(void *, const void *))RMMethodPointer(RMShopPackageGetTotalCoinsWithBonusMethodInfo);
+        RMLog(@"[GRANT] resolved fns AddCoins=%p AddBooster=%p AddTime=%p AddInGameTime=%p TotalCoins=%p", RMUserInventoryAddCoinsFn, RMUserInventoryAddBoosterFn, RMUserInventoryAddTimeFn, RMUserInventoryAddInGameBoosterTimeFn, RMShopPackageGetTotalCoinsWithBonusFn);
+
+        RMHookIl2CppFunction("Royal.Player.Context.Data.Persistent", "UserInventory", "UpdateCoins", 1, (void *)&RMUserInventoryUpdateCoinsHook, (void **)&RMOrigUserInventoryUpdateCoins, @"UserInventory.UpdateCoins");
+        RMHookIl2CppFunction("Royal.Player.Context.Data.Persistent", "UserInventory", "set_Coins", 1, (void *)&RMUserInventorySetCoinsHook, (void **)&RMOrigUserInventorySetCoins, @"UserInventory.set_Coins");
+        RMHookIl2CppFunction("Royal.Player.Context.Data.Persistent", "UserInventory", "UpdateInGameInventory", 1, (void *)&RMUserInventoryUpdateInGameInventoryHook, (void **)&RMOrigUserInventoryUpdateInGameInventory, @"UserInventory.UpdateInGameInventory");
+        RMHookIl2CppFunction("Royal.Player.Context.Data.Persistent", "UserInventory", "UpdatePreLevelInventory", 1, (void *)&RMUserInventoryUpdatePreLevelInventoryHook, (void **)&RMOrigUserInventoryUpdatePreLevelInventory, @"UserInventory.UpdatePreLevelInventory");
+        RMHookIl2CppFunction("Royal.Player.Context.Data.Persistent", "UserInventory", "UpdateRemainingBoosterTimes", 1, (void *)&RMUserInventoryUpdateRemainingBoosterTimesHook, (void **)&RMOrigUserInventoryUpdateRemainingBoosterTimes, @"UserInventory.UpdateRemainingBoosterTimes");
+        RMHookIl2CppFunction("Royal.Player.Context.Data.Persistent", "UserInventory", "UpdateRocketEndTime", 1, (void *)&RMUserInventoryUpdateRocketEndTimeHook, (void **)&RMOrigUserInventoryUpdateRocketEndTime, @"UserInventory.UpdateRocketEndTime");
+        RMHookIl2CppFunction("Royal.Player.Context.Data.Persistent", "UserInventory", "UpdateTntEndTime", 1, (void *)&RMUserInventoryUpdateTntEndTimeHook, (void **)&RMOrigUserInventoryUpdateTntEndTime, @"UserInventory.UpdateTntEndTime");
+        RMHookIl2CppFunction("Royal.Player.Context.Data.Persistent", "UserInventory", "UpdateLightballEndTime", 1, (void *)&RMUserInventoryUpdateLightballEndTimeHook, (void **)&RMOrigUserInventoryUpdateLightballEndTime, @"UserInventory.UpdateLightballEndTime");
+        RMUnityGrantHooksInstalled = YES;
+    } @catch (NSException *e) {
+        RMLog(@"[GRANT] install exception: %@", e);
+    }
+}
+
 static void RMInstallUnityFailHooks(void) {
     @try {
         RMLog(@"[UNITYHOOK] install start");
@@ -313,6 +588,10 @@ static void RMInstallUnityFailHooks(void) {
         RMUnitySendPurchaseSuccessMethodInfo = RMResolveIl2CppMethodInfo("Royal.Scenes.Home.Ui.Sections.Shop", "PurchaseStrategy", "SendPurchaseSuccess", 3);
         RMUnitySendPurchaseSuccessFn = (void (*)(void *, void *, void *, bool, const void *))RMMethodPointer(RMUnitySendPurchaseSuccessMethodInfo);
         if (RMUnitySendPurchaseSuccessFn) RMLog(@"[UNITYHOOK] resolved PurchaseStrategy.SendPurchaseSuccess fn=%p methodInfo=%p", RMUnitySendPurchaseSuccessFn, RMUnitySendPurchaseSuccessMethodInfo);
+        if (RMUnitySendPurchaseSuccessFn && !RMOrigUnitySendPurchaseSuccess) {
+            MSHookFunction((void *)RMUnitySendPurchaseSuccessFn, (void *)&RMUnitySendPurchaseSuccessHook, (void **)&RMOrigUnitySendPurchaseSuccess);
+            RMLog(@"[UNITYHOOK] hooked PurchaseStrategy.SendPurchaseSuccess ptr=%p", RMUnitySendPurchaseSuccessFn);
+        }
 
         void *onVerificationResult = RMResolveIl2CppMethodPointer("Royal.Infrastructure.Services.Native.Purchase", "PurchaseManager", "OnVerificationResult", 1);
         if (onVerificationResult && !RMOrigUnityOnVerificationResult) {
@@ -324,6 +603,7 @@ static void RMInstallUnityFailHooks(void) {
             MSHookFunction(isSuccess, (void *)&RMUnityPurchaseResultIsSuccessHook, (void **)&RMOrigUnityPurchaseResultIsSuccess);
             RMLog(@"[UNITYHOOK] hooked PurchaseResult.get_IsSuccess ptr=%p", isSuccess);
         }
+        RMInstallUnityGrantHooks();
         RMLog(@"[UNITYHOOK] install done");
     } @catch (NSException *e) {
         RMLog(@"[UNITYHOOK] install exception: %@", e);
@@ -428,7 +708,8 @@ static void RMResetManagerAfterAck(id manager) {
 
 static void RMCompleteWithProduct(id manager, id productIdentifier, NSString *reason) {
     RMFakeTransaction *tx = RMMakeFakeTransaction(productIdentifier);
-    RMLog(@"%@ pid=%@ tx=%@", reason, tx.payment.productIdentifier, tx.transactionIdentifier);
+    RMPurchaseSequence++;
+    RMLog(@"%@ seq=%lu pid=%@ tx=%@", reason, (unsigned long)RMPurchaseSequence, tx.payment.productIdentifier, tx.transactionIdentifier);
     RMPrepareManagerForSuccess(manager, productIdentifier);
 
     Class resultClass = objc_getClass("DGPurchaseResult");
