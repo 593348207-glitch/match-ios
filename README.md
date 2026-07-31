@@ -38,3 +38,7 @@ Adds IL2CPP runtime class/method enumeration for purchase, shop package, invento
 ## 1.1.0 Unity fail suppression
 
 Adds IL2CPP methodPointer hooks for `Royal.Scenes.Home.Ui.Sections.Shop.PurchaseStrategy::OnPurchaseFail` and `SendPurchaseFail`. This confirms and suppresses Unity-side failure callbacks after native fake purchase succeeds. Logs use `[UNITYHOOK]` in `Documents/RoyalMatchIAPHook.log`.
+
+## 1.1.3 pass entitlement grant
+
+Adds IL2CPP hooks for RoyalPass/WeeklyPass purchase success paths. Royal Pass now calls `UserInventory.UpdateRoyalPassIsGold(true)` and falls back to raw `RoyalPassProgress` bit/flag writes. Weekly Pass calls `WeeklyPassHelper.SetWeeklyPassPurchased()` / `WeeklyPassProgress.SetIsPurchased(true)` when a manager is available. Logs use `[PASS]` and rollback clamps use `[NOROLLBACK]`.

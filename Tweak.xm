@@ -23,18 +23,28 @@ static bool (*RMOrigUnityPurchaseResultIsSuccess)(void *self, const void *method
 static void (*RMUnitySendPurchaseSuccessFn)(void *self, void *config, void *purchaseResult, bool isRoyalFavorFromMoreLives, const void *method) = NULL;
 static const void *RMUnitySendPurchaseSuccessMethodInfo = NULL;
 static void (*RMOrigUnitySendPurchaseSuccess)(void *self, void *config, void *purchaseResult, bool isRoyalFavorFromMoreLives, const void *method) = NULL;
+static void (*RMOrigRoyalPassOnPurchaseSuccess)(void *self, void *config, void *purchaseResult, const void *method) = NULL;
+static void (*RMOrigWeeklyPassOnPurchaseSuccess)(void *self, void *config, void *purchaseResult, const void *method) = NULL;
+static void (*RMOrigRoyalPassDialogPurchaseStrategySuccess)(void *self, const void *method) = NULL;
+static void (*RMOrigWeeklyPassDialogPurchaseStrategySuccess)(void *self, const void *method) = NULL;
 static void (*RMUserInventoryAddCoinsFn)(void *self, int delta, bool shouldUpdateMissionProgress, const void *method) = NULL;
 static void (*RMUserInventoryAddBoosterFn)(void *self, int boosterType, int delta, const void *method) = NULL;
 static void (*RMUserInventoryAddTimeFn)(void *self, int boosterType, int deltaSeconds, const void *method) = NULL;
 static void (*RMUserInventoryAddInGameBoosterTimeFn)(void *self, int boosterType, int deltaSeconds, const void *method) = NULL;
 static void *(*RMUserManagerGetCurrentUserFn)(const void *method) = NULL;
 static int (*RMShopPackageGetTotalCoinsWithBonusFn)(void *config, const void *method) = NULL;
+static void (*RMUserInventoryUpdateRoyalPassIsGoldFn)(void *self, bool isGold, const void *method) = NULL;
+static void (*RMWeeklyPassHelperSetPurchasedFn)(void *self, const void *method) = NULL;
+static void (*RMWeeklyPassProgressSetPurchasedFn)(void *self, bool isPurchased, const void *method) = NULL;
 static const void *RMUserInventoryAddCoinsMethodInfo = NULL;
 static const void *RMUserInventoryAddBoosterMethodInfo = NULL;
 static const void *RMUserInventoryAddTimeMethodInfo = NULL;
 static const void *RMUserInventoryAddInGameBoosterTimeMethodInfo = NULL;
 static const void *RMUserManagerGetCurrentUserMethodInfo = NULL;
 static const void *RMShopPackageGetTotalCoinsWithBonusMethodInfo = NULL;
+static const void *RMUserInventoryUpdateRoyalPassIsGoldMethodInfo = NULL;
+static const void *RMWeeklyPassHelperSetPurchasedMethodInfo = NULL;
+static const void *RMWeeklyPassProgressSetPurchasedMethodInfo = NULL;
 static void (*RMOrigUserInventoryUpdateCoins)(void *self, int newCoins, const void *method) = NULL;
 static void (*RMOrigUserInventorySetCoins)(void *self, int value, const void *method) = NULL;
 static void (*RMOrigUserInventoryUpdateInGameInventory)(void *self, int64_t value, const void *method) = NULL;
@@ -43,6 +53,8 @@ static void (*RMOrigUserInventoryUpdateRemainingBoosterTimes)(void *self, int64_
 static void (*RMOrigUserInventoryUpdateRocketEndTime)(void *self, int value, const void *method) = NULL;
 static void (*RMOrigUserInventoryUpdateTntEndTime)(void *self, int value, const void *method) = NULL;
 static void (*RMOrigUserInventoryUpdateLightballEndTime)(void *self, int value, const void *method) = NULL;
+static void (*RMOrigUserInventoryUpdateRoyalPassIsGold)(void *self, bool isGold, const void *method) = NULL;
+static void (*RMOrigWeeklyPassProgressSetIsPurchased)(void *self, bool isPurchased, const void *method) = NULL;
 static int32_t RMMaxCoins = 0;
 static int64_t RMMaxInGameInventory = 0;
 static int64_t RMMaxPreLevelInventory = 0;
@@ -51,6 +63,8 @@ static int32_t RMMaxRocketEndTime = 0;
 static int32_t RMMaxTntEndTime = 0;
 static int32_t RMMaxLightballEndTime = 0;
 static NSTimeInterval RMGrantProtectUntil = 0;
+static BOOL RMRoyalPassGranted = NO;
+static BOOL RMWeeklyPassGranted = NO;
 static NSUInteger RMPurchaseSequence = 0;
 static NSUInteger RMLastGrantSequence = 0;
 static BOOL RMUnityGrantHooksInstalled = NO;
@@ -282,6 +296,7 @@ static void RMForcePurchaseResultSuccess(void *purchaseResult, const char *reaso
     RMLog(@"[UNITYHOOK] forced PurchaseResult.status %d->3 reason=%s result=%p time=%lld tx=%p err=%p", oldStatus, reason, purchaseResult, (long long)*timePtr, txString, errString);
 }
 
+static void *RMCurrentUserInventory(void);
 static void RMGrantRewardsFromShopConfig(void *config, void *purchaseResult, const char *reason);
 static void RMUnitySendPurchaseSuccessHook(void *self, void *config, void *purchaseResult, bool isRoyalFavorFromMoreLives, const void *method);
 
@@ -319,6 +334,62 @@ static void RMUnityOnVerificationResultHook(void *self, void *purchaseResult, co
 static int32_t RMReadI32(void *base, ptrdiff_t off) {
     if (!base) return 0;
     return *((int32_t *)((uint8_t *)base + off));
+}
+
+static BOOL RMReadBool(void *base, ptrdiff_t off) {
+    if (!base) return NO;
+    return *((bool *)((uint8_t *)base + off)) ? YES : NO;
+}
+
+static void RMWriteBool(void *base, ptrdiff_t off, BOOL value) {
+    if (!base) return;
+    *((bool *)((uint8_t *)base + off)) = value ? true : false;
+}
+
+static void RMGrantRoyalPassOnInventory(void *inventory, const char *reason) {
+    if (!inventory) { RMLog(@"[PASS] RoyalPass inventory unavailable reason=%s", reason); return; }
+    BOOL oldGold = RMReadBool(inventory, 0x68 + 0x18);
+    int64_t oldBits = *((int64_t *)((uint8_t *)inventory + 0x68));
+    if (RMUserInventoryUpdateRoyalPassIsGoldFn && RMUserInventoryUpdateRoyalPassIsGoldMethodInfo) {
+        RMUserInventoryUpdateRoyalPassIsGoldFn(inventory, true, RMUserInventoryUpdateRoyalPassIsGoldMethodInfo);
+        RMLog(@"[PASS] RoyalPass UpdateRoyalPassIsGold(TRUE) reason=%s oldGold=%d bits=0x%llx", reason, oldGold ? 1 : 0, (long long)oldBits);
+    } else {
+        *((int64_t *)((uint8_t *)inventory + 0x68)) = oldBits | 1LL;
+        RMWriteBool(inventory, 0x68 + 0x18, YES);
+        RMLog(@"[PASS] RoyalPass raw grant reason=%s oldGold=%d bits=0x%llx->0x%llx", reason, oldGold ? 1 : 0, (long long)oldBits, (long long)(oldBits | 1LL));
+    }
+    RMRoyalPassGranted = YES;
+    RMGrantProtectUntil = [NSDate.date timeIntervalSince1970] + 900.0;
+}
+
+static void RMGrantWeeklyPassWithManager(void *weeklyPassManager, const char *reason) {
+    void *helper = weeklyPassManager ? *((void **)((uint8_t *)weeklyPassManager + 0x38)) : NULL;
+    void *progress = weeklyPassManager ? *((void **)((uint8_t *)weeklyPassManager + 0x78)) : NULL;
+    BOOL granted = NO;
+    if (helper && RMWeeklyPassHelperSetPurchasedFn && RMWeeklyPassHelperSetPurchasedMethodInfo) {
+        RMWeeklyPassHelperSetPurchasedFn(helper, RMWeeklyPassHelperSetPurchasedMethodInfo);
+        RMLog(@"[PASS] WeeklyPass Helper.SetWeeklyPassPurchased reason=%s manager=%p helper=%p", reason, weeklyPassManager, helper);
+        granted = YES;
+    }
+    if (progress && RMWeeklyPassProgressSetPurchasedFn && RMWeeklyPassProgressSetPurchasedMethodInfo) {
+        RMWeeklyPassProgressSetPurchasedFn(progress, true, RMWeeklyPassProgressSetPurchasedMethodInfo);
+        RMLog(@"[PASS] WeeklyPass Progress.SetIsPurchased(TRUE) reason=%s manager=%p progress=%p", reason, weeklyPassManager, progress);
+        granted = YES;
+    }
+    if (!granted) RMLog(@"[PASS] WeeklyPass grant unavailable reason=%s manager=%p helper=%p progress=%p helperFn=%p progressFn=%p", reason, weeklyPassManager, helper, progress, RMWeeklyPassHelperSetPurchasedFn, RMWeeklyPassProgressSetPurchasedFn);
+    RMWeeklyPassGranted = granted ? YES : RMWeeklyPassGranted;
+    if (granted) RMGrantProtectUntil = [NSDate.date timeIntervalSince1970] + 900.0;
+}
+
+static void RMGrantPassFromConfig(void *config, const char *reason) {
+    if (!config) return;
+    BOOL isRoyalPass = RMReadBool(config, 0xA0);
+    BOOL isWeeklyPass = RMReadBool(config, 0xAE);
+    if (isRoyalPass) RMGrantRoyalPassOnInventory(RMCurrentUserInventory(), reason);
+    if (isWeeklyPass) RMLog(@"[PASS] WeeklyPass config detected reason=%s; waiting for manager-backed hook", reason);
+    if (isRoyalPass || isWeeklyPass) {
+        RMLog(@"[PASS] config flags reason=%s config=%p royal=%d weekly=%d", reason, config, isRoyalPass ? 1 : 0, isWeeklyPass ? 1 : 0);
+    }
 }
 
 static void RMUpdateInventoryMax(void *inventory, const char *reason) {
@@ -394,6 +465,7 @@ static void RMGrantRewardsFromShopConfig(void *config, void *purchaseResult, con
     }
     void *inventory = RMCurrentUserInventory();
     if (!inventory) { RMLog(@"[GRANT] inventory unavailable reason=%s config=%p result=%p", reason, config, purchaseResult); return; }
+    RMGrantPassFromConfig(config, reason);
 
     int coins = RMReadI32(config, 0x48);
     if (RMShopPackageGetTotalCoinsWithBonusFn && RMShopPackageGetTotalCoinsWithBonusMethodInfo) {
@@ -451,6 +523,46 @@ static void RMUnitySendPurchaseSuccessHook(void *self, void *config, void *purch
         RMGrantRewardsFromShopConfig(config, purchaseResult, "SendPurchaseSuccess");
     }
     if (RMOrigUnitySendPurchaseSuccess) RMOrigUnitySendPurchaseSuccess(self, config, purchaseResult, isRoyalFavorFromMoreLives, method);
+}
+
+static void RMRoyalPassOnPurchaseSuccessHook(void *self, void *config, void *purchaseResult, const void *method) {
+    if (RMFreeIAPEnabled) {
+        RMLog(@"[PASS] RoyalPassPurchaseStrategy.OnPurchaseSuccess self=%p config=%p result=%p", self, config, purchaseResult);
+        RMForcePurchaseResultSuccess(purchaseResult, "RoyalPassPurchaseStrategy.OnPurchaseSuccess");
+        RMGrantRewardsFromShopConfig(config, purchaseResult, "RoyalPassStrategy.OnPurchaseSuccess");
+        RMGrantRoyalPassOnInventory(RMCurrentUserInventory(), "RoyalPassStrategy.OnPurchaseSuccess");
+    }
+    if (RMOrigRoyalPassOnPurchaseSuccess) RMOrigRoyalPassOnPurchaseSuccess(self, config, purchaseResult, method);
+}
+
+static void RMWeeklyPassOnPurchaseSuccessHook(void *self, void *config, void *purchaseResult, const void *method) {
+    if (RMFreeIAPEnabled) {
+        RMLog(@"[PASS] WeeklyPassPurchaseStrategy.OnPurchaseSuccess self=%p config=%p result=%p", self, config, purchaseResult);
+        RMForcePurchaseResultSuccess(purchaseResult, "WeeklyPassPurchaseStrategy.OnPurchaseSuccess");
+        RMGrantRewardsFromShopConfig(config, purchaseResult, "WeeklyPassStrategy.OnPurchaseSuccess");
+        void *popup = self ? *((void **)((uint8_t *)self + 0x20)) : NULL;
+        void *manager = popup ? *((void **)((uint8_t *)popup + 0xF0)) : NULL;
+        RMGrantWeeklyPassWithManager(manager, "WeeklyPassStrategy.OnPurchaseSuccess");
+    }
+    if (RMOrigWeeklyPassOnPurchaseSuccess) RMOrigWeeklyPassOnPurchaseSuccess(self, config, purchaseResult, method);
+}
+
+static void RMRoyalPassDialogPurchaseStrategySuccessHook(void *self, const void *method) {
+    if (RMFreeIAPEnabled) {
+        void *manager = self ? *((void **)((uint8_t *)self + 0x118)) : NULL;
+        RMLog(@"[PASS] RoyalPassPurchaseDialog.PurchaseStrategySuccess self=%p manager=%p", self, manager);
+        RMGrantRoyalPassOnInventory(RMCurrentUserInventory(), "RoyalPassDialog.PurchaseStrategySuccess");
+    }
+    if (RMOrigRoyalPassDialogPurchaseStrategySuccess) RMOrigRoyalPassDialogPurchaseStrategySuccess(self, method);
+}
+
+static void RMWeeklyPassDialogPurchaseStrategySuccessHook(void *self, const void *method) {
+    if (RMFreeIAPEnabled) {
+        void *manager = self ? *((void **)((uint8_t *)self + 0xB8)) : NULL;
+        RMLog(@"[PASS] WeeklyPassPurchaseDialog.PurchaseStrategySuccess self=%p manager=%p", self, manager);
+        RMGrantWeeklyPassWithManager(manager, "WeeklyPassDialog.PurchaseStrategySuccess");
+    }
+    if (RMOrigWeeklyPassDialogPurchaseStrategySuccess) RMOrigWeeklyPassDialogPurchaseStrategySuccess(self, method);
 }
 
 
@@ -535,6 +647,22 @@ static void RMUserInventoryUpdateLightballEndTimeHook(void *self, int value, con
     RMUpdateInventoryMax(self, "UpdateLightballEndTime");
 }
 
+static void RMUserInventoryUpdateRoyalPassIsGoldHook(void *self, bool isGold, const void *method) {
+    if (RMShouldProtectGrantedInventory() && RMRoyalPassGranted && !isGold) {
+        RMLog(@"[NOROLLBACK] UpdateRoyalPassIsGold clamp false -> true self=%p", self);
+        isGold = true;
+    }
+    if (RMOrigUserInventoryUpdateRoyalPassIsGold) RMOrigUserInventoryUpdateRoyalPassIsGold(self, isGold, method);
+}
+
+static void RMWeeklyPassProgressSetIsPurchasedHook(void *self, bool isPurchased, const void *method) {
+    if (RMShouldProtectGrantedInventory() && RMWeeklyPassGranted && !isPurchased) {
+        RMLog(@"[NOROLLBACK] WeeklyPassProgress.SetIsPurchased clamp false -> true self=%p", self);
+        isPurchased = true;
+    }
+    if (RMOrigWeeklyPassProgressSetIsPurchased) RMOrigWeeklyPassProgressSetIsPurchased(self, isPurchased, method);
+}
+
 static void RMHookIl2CppFunction(const char *ns, const char *klass, const char *name, int argc, void *hook, void **orig, NSString *label) {
     void *ptr = RMResolveIl2CppMethodPointer(ns, klass, name, argc);
     if (ptr && orig && !*orig) {
@@ -556,7 +684,13 @@ static void RMInstallUnityGrantHooks(void) {
         RMUserInventoryAddInGameBoosterTimeFn = (void (*)(void *, int, int, const void *))RMMethodPointer(RMUserInventoryAddInGameBoosterTimeMethodInfo);
         RMShopPackageGetTotalCoinsWithBonusMethodInfo = RMResolveIl2CppMethodInfo("Royal.Scenes.Home.Ui.Sections.Shop.Package", "ShopPackageConfig", "get_TotalCoinsWithBonus", 0);
         RMShopPackageGetTotalCoinsWithBonusFn = (int (*)(void *, const void *))RMMethodPointer(RMShopPackageGetTotalCoinsWithBonusMethodInfo);
-        RMLog(@"[GRANT] resolved fns AddCoins=%p AddBooster=%p AddTime=%p AddInGameTime=%p TotalCoins=%p", RMUserInventoryAddCoinsFn, RMUserInventoryAddBoosterFn, RMUserInventoryAddTimeFn, RMUserInventoryAddInGameBoosterTimeFn, RMShopPackageGetTotalCoinsWithBonusFn);
+        RMUserInventoryUpdateRoyalPassIsGoldMethodInfo = RMResolveIl2CppMethodInfo("Royal.Player.Context.Data.Persistent", "UserInventory", "UpdateRoyalPassIsGold", 1);
+        RMUserInventoryUpdateRoyalPassIsGoldFn = (void (*)(void *, bool, const void *))RMMethodPointer(RMUserInventoryUpdateRoyalPassIsGoldMethodInfo);
+        RMWeeklyPassHelperSetPurchasedMethodInfo = RMResolveIl2CppMethodInfo("Royal.Scenes.Home.Ui.Dialogs.WeeklyPass.Scripts", "WeeklyPassHelper", "SetWeeklyPassPurchased", 0);
+        RMWeeklyPassHelperSetPurchasedFn = (void (*)(void *, const void *))RMMethodPointer(RMWeeklyPassHelperSetPurchasedMethodInfo);
+        RMWeeklyPassProgressSetPurchasedMethodInfo = RMResolveIl2CppMethodInfo("Royal.Player.Context.Data.Persistent", "WeeklyPassProgress", "SetIsPurchased", 1);
+        RMWeeklyPassProgressSetPurchasedFn = (void (*)(void *, bool, const void *))RMMethodPointer(RMWeeklyPassProgressSetPurchasedMethodInfo);
+        RMLog(@"[GRANT] resolved fns AddCoins=%p AddBooster=%p AddTime=%p AddInGameTime=%p TotalCoins=%p RoyalPassGold=%p WeeklyHelper=%p WeeklyProgress=%p", RMUserInventoryAddCoinsFn, RMUserInventoryAddBoosterFn, RMUserInventoryAddTimeFn, RMUserInventoryAddInGameBoosterTimeFn, RMShopPackageGetTotalCoinsWithBonusFn, RMUserInventoryUpdateRoyalPassIsGoldFn, RMWeeklyPassHelperSetPurchasedFn, RMWeeklyPassProgressSetPurchasedFn);
 
         RMHookIl2CppFunction("Royal.Player.Context.Data.Persistent", "UserInventory", "UpdateCoins", 1, (void *)&RMUserInventoryUpdateCoinsHook, (void **)&RMOrigUserInventoryUpdateCoins, @"UserInventory.UpdateCoins");
         RMHookIl2CppFunction("Royal.Player.Context.Data.Persistent", "UserInventory", "set_Coins", 1, (void *)&RMUserInventorySetCoinsHook, (void **)&RMOrigUserInventorySetCoins, @"UserInventory.set_Coins");
@@ -566,6 +700,8 @@ static void RMInstallUnityGrantHooks(void) {
         RMHookIl2CppFunction("Royal.Player.Context.Data.Persistent", "UserInventory", "UpdateRocketEndTime", 1, (void *)&RMUserInventoryUpdateRocketEndTimeHook, (void **)&RMOrigUserInventoryUpdateRocketEndTime, @"UserInventory.UpdateRocketEndTime");
         RMHookIl2CppFunction("Royal.Player.Context.Data.Persistent", "UserInventory", "UpdateTntEndTime", 1, (void *)&RMUserInventoryUpdateTntEndTimeHook, (void **)&RMOrigUserInventoryUpdateTntEndTime, @"UserInventory.UpdateTntEndTime");
         RMHookIl2CppFunction("Royal.Player.Context.Data.Persistent", "UserInventory", "UpdateLightballEndTime", 1, (void *)&RMUserInventoryUpdateLightballEndTimeHook, (void **)&RMOrigUserInventoryUpdateLightballEndTime, @"UserInventory.UpdateLightballEndTime");
+        RMHookIl2CppFunction("Royal.Player.Context.Data.Persistent", "UserInventory", "UpdateRoyalPassIsGold", 1, (void *)&RMUserInventoryUpdateRoyalPassIsGoldHook, (void **)&RMOrigUserInventoryUpdateRoyalPassIsGold, @"UserInventory.UpdateRoyalPassIsGold");
+        RMHookIl2CppFunction("Royal.Player.Context.Data.Persistent", "WeeklyPassProgress", "SetIsPurchased", 1, (void *)&RMWeeklyPassProgressSetIsPurchasedHook, (void **)&RMOrigWeeklyPassProgressSetIsPurchased, @"WeeklyPassProgress.SetIsPurchased");
         RMUnityGrantHooksInstalled = YES;
     } @catch (NSException *e) {
         RMLog(@"[GRANT] install exception: %@", e);
@@ -603,6 +739,10 @@ static void RMInstallUnityFailHooks(void) {
             MSHookFunction(isSuccess, (void *)&RMUnityPurchaseResultIsSuccessHook, (void **)&RMOrigUnityPurchaseResultIsSuccess);
             RMLog(@"[UNITYHOOK] hooked PurchaseResult.get_IsSuccess ptr=%p", isSuccess);
         }
+        RMHookIl2CppFunction("Royal.Scenes.Home.Ui.Dialogs.RoyalPass", "RoyalPassPurchaseStrategy", "OnPurchaseSuccess", 2, (void *)&RMRoyalPassOnPurchaseSuccessHook, (void **)&RMOrigRoyalPassOnPurchaseSuccess, @"RoyalPassPurchaseStrategy.OnPurchaseSuccess");
+        RMHookIl2CppFunction("Royal.Scenes.Home.Ui.Dialogs.WeeklyPass.Scripts", "WeeklyPassPurchaseStrategy", "OnPurchaseSuccess", 2, (void *)&RMWeeklyPassOnPurchaseSuccessHook, (void **)&RMOrigWeeklyPassOnPurchaseSuccess, @"WeeklyPassPurchaseStrategy.OnPurchaseSuccess");
+        RMHookIl2CppFunction("Royal.Scenes.Home.Ui.Dialogs.RoyalPass", "RoyalPassPurchaseDialog", "PurchaseStrategySuccess", 0, (void *)&RMRoyalPassDialogPurchaseStrategySuccessHook, (void **)&RMOrigRoyalPassDialogPurchaseStrategySuccess, @"RoyalPassPurchaseDialog.PurchaseStrategySuccess");
+        RMHookIl2CppFunction("Royal.Scenes.Home.Ui.Dialogs.WeeklyPass.Scripts", "WeeklyPassPurchaseDialog", "PurchaseStrategySuccess", 0, (void *)&RMWeeklyPassDialogPurchaseStrategySuccessHook, (void **)&RMOrigWeeklyPassDialogPurchaseStrategySuccess, @"WeeklyPassPurchaseDialog.PurchaseStrategySuccess");
         RMInstallUnityGrantHooks();
         RMLog(@"[UNITYHOOK] install done");
     } @catch (NSException *e) {
